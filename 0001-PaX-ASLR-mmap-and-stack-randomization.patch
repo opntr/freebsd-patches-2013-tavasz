@@ -1,0 +1,930 @@
+From be43889730ce12c635bb242bd4c4c1df7ce6778d Mon Sep 17 00:00:00 2001
+From: Oliver Pinter <oliver.pntr@gmail.com>
+Date: Sat, 27 Apr 2013 00:36:43 +0200
+Subject: [PATCH 1/2] PaX ASLR - mmap and stack randomization
+
+***
+
+added basic PaX ASLR defines and sysctls
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - fix build and fix strange copy & paste errors
+
+/usr/home/op/git/freebsd-base.git.http/sys/kern/kern_pax.c:213:1: error:
+unused function 'sysctl_pax_aslr_compat_status'
+[-Werror,-Wunused-function]
+sysctl_pax_aslr_compat_status(SYSCTL_HANDLER_ARGS)
+	^
+	1 error generated.
+	*** [kern_pax.o] Error code 1
+	1 error
+	*** [buildkernel] Error code 2
+	1 error
+	*** [buildkernel] Error code 2
+	1 error
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - fix more copypaste errer...
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - fix sysctl's description
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - added bool pax_aslr_active(struct thread *td)
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - added mmap randomization
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - hooked in mmap randomization
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - fixed ASLR initialization logic
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - added stack randomization
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - randomize the stack in freebsd32 compat layer
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - align stack delta
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - added Copyright
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - rename pax_aslr(...) to pax_aslr_mmap(...)
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - initialize vm_aslr_delta_* on vmspace allocation
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+---
+ sys/compat/freebsd32/freebsd32_misc.c |  13 +
+ sys/conf/files                        |   1 +
+ sys/conf/options                      |   5 +
+ sys/kern/kern_exec.c                  |  16 ++
+ sys/kern/kern_pax.c                   | 450 ++++++++++++++++++++++++++++++++++
+ sys/sys/pax.h                         | 161 ++++++++++++
+ sys/vm/vm_map.c                       |   6 +
+ sys/vm/vm_map.h                       |   2 +
+ sys/vm/vm_mmap.c                      |  14 ++
+ 9 files changed, 668 insertions(+)
+ create mode 100644 sys/kern/kern_pax.c
+ create mode 100644 sys/sys/pax.h
+
+diff --git a/sys/compat/freebsd32/freebsd32_misc.c b/sys/compat/freebsd32/freebsd32_misc.c
+index 934a32d..3f28724e 100644
+--- a/sys/compat/freebsd32/freebsd32_misc.c
++++ b/sys/compat/freebsd32/freebsd32_misc.c
+@@ -30,6 +30,7 @@ __FBSDID("$FreeBSD$");
+ #include "opt_compat.h"
+ #include "opt_inet.h"
+ #include "opt_inet6.h"
++#include "opt_pax.h"
+ 
+ #define __ELF_WORD_SIZE 32
+ 
+@@ -104,6 +105,10 @@ __FBSDID("$FreeBSD$");
+ #include <compat/freebsd32/freebsd32_signal.h>
+ #include <compat/freebsd32/freebsd32_proto.h>
+ 
++#ifdef PAX_ASLR
++#include <sys/pax.h>
++#endif /* PAX_ASLR */
++
+ #ifndef __mips__
+ CTASSERT(sizeof(struct timeval32) == 8);
+ CTASSERT(sizeof(struct timespec32) == 8);
+@@ -2712,6 +2717,9 @@ freebsd32_copyout_strings(struct image_params *imgp)
+ 	int argc, envc, i;
+ 	u_int32_t *vectp;
+ 	char *stringp, *destp;
++#ifdef PAX_ASLR
++	char *orig_destp;
++#endif /* PAX_ASLR */
+ 	u_int32_t *stack_base;
+ 	struct freebsd32_ps_strings *arginfo;
+ 	char canary[sizeof(long) * 8];
+@@ -2739,6 +2747,11 @@ freebsd32_copyout_strings(struct image_params *imgp)
+ 	    roundup(sizeof(pagesizes32), sizeof(char *)) -
+ 	    roundup((ARG_MAX - imgp->args->stringspace), sizeof(char *));
+ 
++#ifdef PAX_ASLR
++	orig_destp = destp;
++	pax_aslr_stack(curthread, &destp, orig_destp);
++#endif /* PAX_ASLR */
++
+ 	/*
+ 	 * install sigcode
+ 	 */
+diff --git a/sys/conf/files b/sys/conf/files
+index 6972375..7d03b2d 100644
+--- a/sys/conf/files
++++ b/sys/conf/files
+@@ -2639,6 +2639,7 @@ kern/kern_mtxpool.c		standard
+ kern/kern_mutex.c		standard
+ kern/kern_ntptime.c		standard
+ kern/kern_osd.c			standard
++kern/kern_pax.c			optional pax_aslr
+ kern/kern_physio.c		standard
+ kern/kern_pmc.c			standard
+ kern/kern_poll.c		optional device_polling
+diff --git a/sys/conf/options b/sys/conf/options
+index b124820..4cb6a83 100644
+--- a/sys/conf/options
++++ b/sys/conf/options
+@@ -894,3 +894,8 @@ RACCT		opt_global.h
+ 
+ # Resource Limits
+ RCTL		opt_global.h
++
++# PaX - hardening options
++PAX_ASLR		opt_pax.h
++PAX_ASLR_MAX_SEC	opt_pax.h
++PAX_ASLR_DEBUG		opt_pax.h
+diff --git a/sys/kern/kern_exec.c b/sys/kern/kern_exec.c
+index 3890157..1a3ede0 100644
+--- a/sys/kern/kern_exec.c
++++ b/sys/kern/kern_exec.c
+@@ -31,6 +31,7 @@ __FBSDID("$FreeBSD$");
+ #include "opt_hwpmc_hooks.h"
+ #include "opt_kdtrace.h"
+ #include "opt_ktrace.h"
++#include "opt_pax.h"
+ #include "opt_vm.h"
+ 
+ #include <sys/param.h>
+@@ -95,6 +96,10 @@ __FBSDID("$FreeBSD$");
+ dtrace_execexit_func_t	dtrace_fasttrap_exec;
+ #endif
+ 
++#ifdef PAX_ASLR
++#include <sys/pax.h>
++#endif /* PAX_ASLR */
++
+ SDT_PROVIDER_DECLARE(proc);
+ SDT_PROBE_DEFINE(proc, kernel, , exec, exec);
+ SDT_PROBE_ARGTYPE(proc, kernel, , exec, 0, "char *");
+@@ -1044,6 +1049,10 @@ exec_new_vmspace(imgp, sv)
+ 		map = &vmspace->vm_map;
+ 	}
+ 
++#ifdef PAX_ASLR
++	pax_aslr_init(curthread, imgp);
++#endif /* PAX_ASLR */
++
+ 	/* Map a shared page */
+ 	obj = sv->sv_shared_page_obj;
+ 	if (obj != NULL) {
+@@ -1220,6 +1229,9 @@ exec_copyout_strings(imgp)
+ 	int argc, envc;
+ 	char **vectp;
+ 	char *stringp, *destp;
++#ifdef	PAX_ASLR
++	char *orig_destp;
++#endif /* PAX_ASLR */
+ 	register_t *stack_base;
+ 	struct ps_strings *arginfo;
+ 	struct proc *p;
+@@ -1248,6 +1260,10 @@ exec_copyout_strings(imgp)
+ 	    roundup(sizeof(canary), sizeof(char *)) -
+ 	    roundup(szps, sizeof(char *)) -
+ 	    roundup((ARG_MAX - imgp->args->stringspace), sizeof(char *));
++#ifdef PAX_ASLR
++	orig_destp = destp;
++	pax_aslr_stack(curthread, &destp, orig_destp);
++#endif /* PAX_ASLR */
+ 
+ 	/*
+ 	 * install sigcode
+diff --git a/sys/kern/kern_pax.c b/sys/kern/kern_pax.c
+new file mode 100644
+index 0000000..02699b3
+--- /dev/null
++++ b/sys/kern/kern_pax.c
+@@ -0,0 +1,450 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#include <sys/cdefs.h>
++__FBSDID("$FreeBSD$");
++
++#include "opt_pax.h"
++#include "opt_compat.h"
++
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/kernel.h>
++#include <sys/imgact.h>
++#include <sys/sysent.h>
++#include <sys/proc.h>
++#include <sys/elf_common.h>
++#include <sys/pax.h>
++#include <sys/sysctl.h>
++#include <sys/vnode.h>
++#include <sys/queue.h>
++#include <sys/libkern.h>
++
++#include <sys/mman.h>
++#include <sys/libkern.h>
++#include <sys/exec.h>
++
++#include <vm/pmap.h>
++#include <vm/vm_map.h>
++
++static int sysctl_pax_aslr_status(SYSCTL_HANDLER_ARGS);
++static int sysctl_pax_aslr_mmap(SYSCTL_HANDLER_ARGS);
++static int sysctl_pax_aslr_stack(SYSCTL_HANDLER_ARGS);
++static int sysctl_pax_aslr_exec(SYSCTL_HANDLER_ARGS);
++
++/*
++ * sysctls and tunables
++ */
++int pax_aslr_status = PAX_ASLR_ENABLED;
++
++#ifdef PAX_ASLR_MAX_SEC
++int pax_aslr_mmap_len = PAX_ASLR_DELTA_MMAP_MAX_LEN;
++int pax_aslr_stack_len = PAX_ASLR_DELTA_STACK_MAX_LEN;
++int pax_aslr_exec_len = PAX_ASLR_DELTA_EXEC_MAX_LEN;
++#else
++int pax_aslr_mmap_len = PAX_ASLR_DELTA_MMAP_MIN_LEN;
++int pax_aslr_stack_len = PAX_ASLR_DELTA_STACK_MIN_LEN;
++int pax_aslr_exec_len = PAX_ASLR_DELTA_EXEC_MIN_LEN;
++#endif /* PAX_ASLR_MAX_SEC */
++
++
++SYSCTL_NODE(_security, OID_AUTO, pax, CTLFLAG_RD, 0,
++	"PaX (exploit mitigation) features.");
++SYSCTL_NODE(_security_pax, OID_AUTO, aslr, CTLFLAG_RD, 0,
++	"Address Space Layout Randomization.");
++
++SYSCTL_PROC(_security_pax_aslr, OID_AUTO, status,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_status, "I",
++	"Restrictions status. "
++	"0 - disabled, "
++	"1 - enabled,  "
++	"2 - global enabled, "
++	"3 - force global enabled");
++TUNABLE_INT("security.pax.aslr.status", &pax_aslr_status);
++
++SYSCTL_PROC(_security_pax_aslr, OID_AUTO, mmap_len,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_mmap, "I",
++	"Number of bits randomized for mmap(2) calls. "
++	"32 bit: [8,16] 64 bit: [16,32]");
++TUNABLE_INT("security.pax.aslr.mmap", &pax_aslr_mmap_len);
++
++SYSCTL_PROC(_security_pax_aslr, OID_AUTO, stack_len,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_stack, "I",
++	"Number of bits randomized for the stack. "
++	"32 bit: [6,12] 64 bit: [12,21]");
++TUNABLE_INT("security.pax.aslr.stack", &pax_aslr_stack_len);
++
++SYSCTL_PROC(_security_pax_aslr, OID_AUTO, exec_len,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_exec, "I",
++	"Number of bits randomized for the PIE exec base. "
++	"32 bit: [6,12] 64 bit: [12,21]");
++TUNABLE_INT("security.pax.aslr.stack", &pax_aslr_exec_len);
++
++static int
++sysctl_pax_aslr_status(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_status;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	switch (val) {
++		case	PAX_ASLR_DISABLED:
++		case	PAX_ASLR_ENABLED:
++		case	PAX_ASLR_GLOBAL_ENABLED:
++		case	PAX_ASLR_FORCE_GLOBAL_ENABLED:
++			pax_aslr_status = val;
++			break;
++		default:
++			return (EINVAL);
++	}
++
++	return (0);
++}
++
++static int
++sysctl_pax_aslr_mmap(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_mmap_len;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	if (val < PAX_ASLR_DELTA_MMAP_MIN_LEN
++	    || val > PAX_ASLR_DELTA_MMAP_MAX_LEN)
++		return (EINVAL);
++
++	pax_aslr_mmap_len = val;
++
++	return (0);
++}
++
++static int
++sysctl_pax_aslr_stack(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_stack_len;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	if (val < PAX_ASLR_DELTA_STACK_MIN_LEN
++	    || val > PAX_ASLR_DELTA_STACK_MAX_LEN)
++		return (EINVAL);
++
++	pax_aslr_stack_len = val;
++
++	return (0);
++}
++
++static int
++sysctl_pax_aslr_exec(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_exec_len;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	if (val < PAX_ASLR_DELTA_EXEC_MIN_LEN
++	    || val > PAX_ASLR_DELTA_EXEC_MAX_LEN)
++		return (EINVAL);
++
++	pax_aslr_exec_len = val;
++
++	return (0);
++}
++
++/*
++ * COMPAT_FREEBSD32 and linuxulator..
++ */
++#ifdef COMPAT_FREEBSD32
++int pax_aslr_compat_status = PAX_ASLR_ENABLED;
++
++static int sysctl_pax_aslr_compat_status(SYSCTL_HANDLER_ARGS);
++static int sysctl_pax_aslr_compat_mmap(SYSCTL_HANDLER_ARGS);
++static int sysctl_pax_aslr_compat_stack(SYSCTL_HANDLER_ARGS);
++static int sysctl_pax_aslr_compat_exec(SYSCTL_HANDLER_ARGS);
++
++#ifdef PAX_ASLR_MAX_SEC
++int pax_aslr_compat_mmap_len = PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN;
++int pax_aslr_compat_stack_len = PAX_ASLR_COMPAT_DELTA_STACK_MAX_LEN;
++int pax_aslr_compat_exec_len = PAX_ASLR_COMPAT_DELTA_EXEC_MAX_LEN;
++#else
++int pax_aslr_compat_mmap_len = PAX_ASLR_COMPAT_DELTA_MMAP_MIN_LEN;
++int pax_aslr_compat_stack_len = PAX_ASLR_COMPAT_DELTA_STACK_MIN_LEN;
++int pax_aslr_compat_exec_len = PAX_ASLR_COMPAT_DELTA_EXEC_MIN_LEN;
++#endif /* PAX_ASLR_MAX_SEC */
++
++SYSCTL_NODE(_security_pax_aslr, OID_AUTO, compat, CTLFLAG_RD, 0,
++	"Setting for COMPAT_FREEBSD32 and linuxulator.");
++
++SYSCTL_PROC(_security_pax_aslr_compat, OID_AUTO, status,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_compat_status, "I",
++	"Restrictions status. "
++	"0 - disabled, "
++	"1 - enabled,  "
++	"2 - global enabled, "
++	"3 - force global enabled");
++TUNABLE_INT("security.pax.aslr.compat.status", &pax_aslr_compat_status);
++
++SYSCTL_PROC(_security_pax_aslr_compat, OID_AUTO, mmap_len,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_compat_mmap, "I",
++	"Number of bits randomized for mmap(2) calls. "
++	"32 bit: [8,16]");
++TUNABLE_INT("security.pax.aslr.compat.mmap", &pax_aslr_compat_mmap_len);
++
++SYSCTL_PROC(_security_pax_aslr_compat, OID_AUTO, stack_len,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_compat_stack, "I",
++	"Number of bits randomized for the stack. "
++	"32 bit: [6,12]");
++TUNABLE_INT("security.pax.aslr.compat.stack", &pax_aslr_compat_stack_len);
++
++SYSCTL_PROC(_security_pax_aslr_compat, OID_AUTO, exec_len,
++	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_TUN,
++	NULL, 0, sysctl_pax_aslr_compat_exec, "I",
++	"Number of bits randomized for the PIE exec base. "
++	"32 bit: [6,12]");
++TUNABLE_INT("security.pax.aslr.compat.stack", &pax_aslr_compat_exec_len);
++
++
++static int
++sysctl_pax_aslr_compat_status(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_compat_status;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	switch (val) {
++		case	PAX_ASLR_DISABLED:
++		case	PAX_ASLR_ENABLED:
++		case	PAX_ASLR_GLOBAL_ENABLED:
++		case	PAX_ASLR_FORCE_GLOBAL_ENABLED:
++			pax_aslr_compat_status = val;
++			break;
++		default:
++			return (EINVAL);
++	}
++
++	return (0);
++}
++
++static int
++sysctl_pax_aslr_compat_mmap(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_compat_mmap_len;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	if (val < PAX_ASLR_COMPAT_DELTA_MMAP_MIN_LEN
++	    || val > PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN)
++		return (EINVAL);
++
++	pax_aslr_compat_mmap_len = val;
++
++	return (0);
++}
++
++static int
++sysctl_pax_aslr_compat_stack(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_compat_stack_len;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	if (val < PAX_ASLR_COMPAT_DELTA_STACK_MIN_LEN
++	    || val > PAX_ASLR_COMPAT_DELTA_STACK_MAX_LEN)
++		return (EINVAL);
++
++	pax_aslr_compat_stack_len = val;
++
++	return (0);
++}
++
++static int
++sysctl_pax_aslr_compat_exec(SYSCTL_HANDLER_ARGS)
++{
++	int	err;
++	int	val;
++
++	val = pax_aslr_compat_exec_len;
++	err = sysctl_handle_int(oidp, &val, sizeof(int), req);
++	if (err || !req->newptr)
++		return (err);
++
++	if (val < PAX_ASLR_COMPAT_DELTA_EXEC_MIN_LEN
++	    || val > PAX_ASLR_COMPAT_DELTA_EXEC_MAX_LEN)
++		return (EINVAL);
++
++	pax_aslr_compat_exec_len = val;
++
++	return (0);
++}
++#endif /* COMPAT_FREEBSD32 */
++
++
++/*
++ * ASLR functions
++ */
++bool
++pax_aslr_active(struct thread *td)
++{
++#ifdef	notyet
++	uint32_t	flags;
++
++	flags = td->td_proc->p_pax;
++#endif /* notyet */
++	switch (pax_aslr_status) {
++	case	PAX_ASLR_DISABLED:
++		return (false);
++	case	PAX_ASLR_FORCE_GLOBAL_ENABLED:
++		return (true);
++	case	PAX_ASLR_ENABLED:
++#ifdef notyet
++		if ((flags & ELF_NOTE_PAX_ASLR) == 0)
++			return (false);
++#endif /* notyet */
++		break;
++	case	PAX_ASLR_GLOBAL_ENABLED:
++#ifdef notyet
++		if ((flags & ELF_NOTE_PAX_NOASLR) != 0)
++			return (false);
++#endif /* notyet */
++		break;
++	default:
++		return (true);
++	}
++
++	return (true);
++}
++
++void
++pax_aslr_init(struct thread *td, struct image_params *imgp)
++{
++	struct vmspace *vm;
++	u_int sv_flags;
++
++	if (imgp == NULL) {
++		panic("[PaX ASLR] pax_aslr_init - imgp == NULL");
++	}
++
++	if (!pax_aslr_active(td))
++		return;
++
++	vm = imgp->proc->p_vmspace;
++	sv_flags = imgp->proc->p_sysent->sv_flags;
++
++#ifndef COMPAT_FREEBSD32
++	vm->vm_aslr_delta_mmap = PAX_ASLR_DELTA(arc4random(),
++		PAX_ASLR_DELTA_MMAP_LSB, pax_aslr_mmap_len);
++	vm->vm_aslr_delta_stack = PAX_ASLR_DELTA(arc4random(),
++		PAX_ASLR_DELTA_STACK_LSB, pax_aslr_stack_len);
++	vm->vm_aslr_delta_stack = ALIGN(vm->vm_aslr_delta_stack);
++#else /* COMPAT_FREEBSD32 */
++	if ((sv_flags & SV_LP64) != 0) {
++		vm->vm_aslr_delta_mmap = PAX_ASLR_DELTA(arc4random(),
++			PAX_ASLR_DELTA_MMAP_LSB, pax_aslr_mmap_len);
++		vm->vm_aslr_delta_stack = PAX_ASLR_DELTA(arc4random(),
++			PAX_ASLR_DELTA_STACK_LSB, pax_aslr_stack_len);
++		vm->vm_aslr_delta_stack = ALIGN(vm->vm_aslr_delta_stack);
++	} else {
++		vm->vm_aslr_delta_mmap = PAX_ASLR_DELTA(arc4random(),
++			PAX_ASLR_COMPAT_DELTA_MMAP_LSB, pax_aslr_compat_mmap_len);
++		vm->vm_aslr_delta_stack = PAX_ASLR_DELTA(arc4random(),
++			PAX_ASLR_COMPAT_DELTA_STACK_LSB, pax_aslr_compat_stack_len);
++		vm->vm_aslr_delta_stack = ALIGN(vm->vm_aslr_delta_stack);
++	}
++#endif /* !COMPAT_FREEBSD32 */
++}
++
++void
++pax_aslr_mmap(struct thread *td, vm_offset_t *addr, vm_offset_t orig_addr, int flags)
++{
++	if (!pax_aslr_active(td))
++		return;
++
++	if (!(flags & MAP_FIXED) && ((orig_addr == 0) || !(flags & MAP_ANON))) {
++#ifdef PAX_ASLR_DEBUG
++		uprintf("[PaX ASLR] applying to %p orig_addr=%p f=%x\n",
++		    (void *)*addr, (void *)orig_addr, flags);
++#endif /* PAX_ASLR_DEBUG */
++		if (!(td->td_proc->p_vmspace->vm_map.flags & MAP_ENTRY_GROWS_DOWN))
++			*addr += td->td_proc->p_vmspace->vm_aslr_delta_mmap;
++		else
++			*addr -= td->td_proc->p_vmspace->vm_aslr_delta_mmap;
++#ifdef PAX_ASLR_DEBUG
++		uprintf("[PaX ASLR] result %p\n", (void *)*addr);
++#endif /* PAX_ASLR_DEBUG */
++	}
++#ifdef PAX_ASLR_DEBUG
++	else
++	    uprintf("[PaX ASLR] not applying to %p orig_addr=%p f=%x\n",
++		(void *)*addr, (void *)orig_addr, flags);
++#endif /* PAX_ASLR_DEBUG */
++}
++
++void
++pax_aslr_stack(struct thread *td, char **addr, char *orig_addr)
++{
++	if (!pax_aslr_active(td))
++		return;
++
++	*addr -= td->td_proc->p_vmspace->vm_aslr_delta_stack;
++#ifdef PAX_ASLR_DEBUG
++	uprintf("[PaX ASLR] orig_addr=%p, addr=%p\n",
++	    (void *)orig_addr, (void *)*addr);
++#endif /* PAX_ASLR_DEBUG */
++}
+diff --git a/sys/sys/pax.h b/sys/sys/pax.h
+new file mode 100644
+index 0000000..9cf7f12
+--- /dev/null
++++ b/sys/sys/pax.h
+@@ -0,0 +1,161 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#ifndef	__SYS_PAX_H
++#define	__SYS_PAX_H
++
++struct image_params;
++struct thread;
++struct vmspace;
++struct vm_offset_t;
++
++/*
++ * used in sysctl handler
++ */
++#define	PAX_ASLR_DISABLED		0
++#define PAX_ASLR_ENABLED		1
++#define PAX_ASLR_GLOBAL_ENABLED		2
++#define	PAX_ASLR_FORCE_GLOBAL_ENABLED	3
++
++#ifndef PAX_ASLR_DELTA
++#define	PAX_ASLR_DELTA(delta, lsb, len)	\
++	(((delta) & ((1UL << (len)) - 1)) << (lsb))
++#endif /* PAX_ASLR_DELTA */
++
++#ifdef PAX_ASLR
++/*
++ * generic ASLR values
++ *
++ *  	MMAP	| 32 bit | 64 bit |
++ * 	+-------+--------+--------+
++ * 	| MIN	|  8 bit | 16 bit |
++ * 	+-------+--------+--------+
++ * 	| MAX   | 16 bit | 32 bit |
++ * 	+-------+--------+--------+
++ *
++ *  	STACK	| 32 bit | 64 bit |
++ * 	+-------+--------+--------+
++ * 	| MIN	|  6 bit | 12 bit |
++ * 	+-------+--------+--------+
++ * 	| MAX   | 10 bit | 21 bit |
++ * 	+-------+--------+--------+
++ *
++ *  	EXEC	| 32 bit | 64 bit |
++ * 	+-------+--------+--------+
++ * 	| MIN	|  6 bit | 12 bit |
++ * 	+-------+--------+--------+
++ * 	| MAX   | 10 bit | 21 bit |
++ * 	+-------+--------+--------+
++ *
++ */
++#ifndef PAX_ASLR_DELTA_MMAP_LSB
++#define PAX_ASLR_DELTA_MMAP_LSB		PAGE_SHIFT
++#endif /* PAX_ASLR_DELTA_MMAP_LSB */
++
++#ifndef PAX_ASLR_DELTA_MMAP_MIN_LEN
++#define PAX_ASLR_DELTA_MMAP_MIN_LEN	((sizeof(void *) * NBBY) / 4)
++#endif /* PAX_ASLR_DELTA_MMAP_MAX_LEN */
++
++#ifndef PAX_ASLR_DELTA_MMAP_MAX_LEN
++#define PAX_ASLR_DELTA_MMAP_MAX_LEN	((sizeof(void *) * NBBY) / 2)
++#endif /* PAX_ASLR_DELTA_MMAP_MAX_LEN */
++
++#ifndef PAX_ASLR_DELTA_STACK_LSB
++#define PAX_ASLR_DELTA_STACK_LSB	0
++#endif /* PAX_ASLR_DELTA_STACK_LSB */
++
++#ifndef PAX_ASLR_DELTA_STACK_MIN_LEN
++#define PAX_ASLR_DELTA_STACK_MIN_LEN	((sizeof(void *) * NBBY) / 5)
++#endif /* PAX_ASLR_DELTA_STACK_MAX_LEN */
++
++#ifndef PAX_ASLR_DELTA_STACK_MAX_LEN
++#define PAX_ASLR_DELTA_STACK_MAX_LEN	((sizeof(void *) * NBBY) / 3)
++#endif /* PAX_ASLR_DELTA_STACK_MAX_LEN */
++
++#ifndef PAX_ASLR_DELTA_EXEC_LSB
++#define PAX_ASLR_DELTA_EXEC_LSB		PAGE_SHIFT
++#endif /* PAX_ASLR_DELTA_EXEC_LSB */
++
++#ifndef PAX_ASLR_DELTA_EXEC_MIN_LEN
++#define PAX_ASLR_DELTA_EXEC_MIN_LEN	((sizeof(void *) * NBBY) / 5)
++#endif /* PAX_ASLR_DELTA_EXEC_MAX_LEN */
++
++#ifndef PAX_ASLR_DELTA_EXEC_MAX_LEN
++#define PAX_ASLR_DELTA_EXEC_MAX_LEN	((sizeof(void *) * NBBY) / 3)
++#endif /* PAX_ASLR_DELTA_EXEC_MAX_LEN */
++
++/*
++ * ASLR values for COMPAT_FREEBSD32 and COMPAT_LINUX
++ */
++#ifndef PAX_ASLR_COMPAT_DELTA_MMAP_LSB
++#define PAX_ASLR_COMPAT_DELTA_MMAP_LSB		PAGE_SHIFT
++#endif /* PAX_ASLR_COMPAT_DELTA_MMAP_LSB */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_MMAP_MIN_LEN
++#define PAX_ASLR_COMPAT_DELTA_MMAP_MIN_LEN	((sizeof(int) * NBBY) / 4)
++#endif /* PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN
++#define PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN	((sizeof(int) * NBBY) / 2)
++#endif /* PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_STACK_LSB
++#define PAX_ASLR_COMPAT_DELTA_STACK_LSB		0
++#endif /* PAX_ASLR_COMPAT_DELTA_STACK_LSB */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_STACK_MIN_LEN
++#define PAX_ASLR_COMPAT_DELTA_STACK_MIN_LEN	((sizeof(int) * NBBY) / 5)
++#endif /* PAX_ASLR_COMPAT_DELTA_STACK_MAX_LEN */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_STACK_MAX_LEN
++#define PAX_ASLR_COMPAT_DELTA_STACK_MAX_LEN	((sizeof(int) * NBBY) / 3)
++#endif /* PAX_ASLR_COMPAT_DELTA_STACK_MAX_LEN */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_EXEC_MIN_LEN
++#define PAX_ASLR_COMPAT_DELTA_EXEC_MIN_LEN	((sizeof(int) * NBBY) / 5)
++#endif /* PAX_ASLR_COMPAT_DELTA_EXEC_MAX_LEN */
++
++#ifndef PAX_ASLR_COMPAT_DELTA_EXEC_MAX_LEN
++#define PAX_ASLR_COMPAT_DELTA_EXEC_MAX_LEN	((sizeof(int) * NBBY) / 3)
++#endif /* PAX_ASLR_COMPAT_DELTA_EXEC_MAX_LEN */
++
++extern int pax_aslr_status;
++extern int pax_aslr_compat_status;
++
++extern int pax_aslr_mmap_len;
++extern int pax_aslr_stack_len;
++extern int pax_aslr_exec_len;
++#endif /* PAX_ASLR */
++
++void pax_init(void);
++bool pax_aslr_active(struct thread *td);
++void pax_aslr_init(struct thread *td, struct image_params *imgp);
++void pax_aslr_mmap(struct thread *td, vm_offset_t *addr,
++			vm_offset_t orig_addr, int flags);
++void pax_aslr_stack(struct thread *td, char **addr, char *orig_addr);
++
++#endif /* __SYS_PAX_H */
+diff --git a/sys/vm/vm_map.c b/sys/vm/vm_map.c
+index 933b0e1..8754aa8 100644
+--- a/sys/vm/vm_map.c
++++ b/sys/vm/vm_map.c
+@@ -65,6 +65,8 @@
+ #include <sys/cdefs.h>
+ __FBSDID("$FreeBSD$");
+ 
++#include "opt_pax.h"
++
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/kernel.h>
+@@ -297,6 +299,10 @@ vmspace_alloc(min, max)
+ 	vm->vm_taddr = 0;
+ 	vm->vm_daddr = 0;
+ 	vm->vm_maxsaddr = 0;
++#ifdef PAX_ASLR
++	vm->vm_aslr_delta_mmap = 0;
++	vm->vm_aslr_delta_stack = 0;
++#endif /* PAX_ASLR */
+ 	return (vm);
+ }
+ 
+diff --git a/sys/vm/vm_map.h b/sys/vm/vm_map.h
+index 135b555..4fe05d6 100644
+--- a/sys/vm/vm_map.h
++++ b/sys/vm/vm_map.h
+@@ -240,6 +240,8 @@ struct vmspace {
+ 	caddr_t vm_taddr;	/* (c) user virtual address of text */
+ 	caddr_t vm_daddr;	/* (c) user virtual address of data */
+ 	caddr_t vm_maxsaddr;	/* user VA at max stack growth */
++	vm_size_t vm_aslr_delta_mmap;	/* mmap() random delta for ASLR */
++	vm_size_t vm_aslr_delta_stack;	/* stack random delta for ASLR */
+ 	volatile int vm_refcnt;	/* number of references */
+ 	/*
+ 	 * Keep the PMAP last, so that CPU-specific variations of that
+diff --git a/sys/vm/vm_mmap.c b/sys/vm/vm_mmap.c
+index c17e9ce..9113fbb 100644
+--- a/sys/vm/vm_mmap.c
++++ b/sys/vm/vm_mmap.c
+@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
+ 
+ #include "opt_compat.h"
+ #include "opt_hwpmc_hooks.h"
++#include "opt_pax.h"
+ 
+ #include <sys/param.h>
+ #include <sys/systm.h>
+@@ -89,6 +90,10 @@ __FBSDID("$FreeBSD$");
+ #include <sys/pmckern.h>
+ #endif
+ 
++#ifdef PAX_ASLR
++#include <sys/pax.h>
++#endif /* PAX_ASLR */
++
+ int old_mlock = 0;
+ SYSCTL_INT(_vm, OID_AUTO, old_mlock, CTLFLAG_RW | CTLFLAG_TUN, &old_mlock, 0,
+     "Do not apply RLIMIT_MEMLOCK on mlockall");
+@@ -197,6 +202,9 @@ sys_mmap(td, uap)
+ 	struct file *fp;
+ 	struct vnode *vp;
+ 	vm_offset_t addr;
++#ifdef PAX_ASLR
++	vm_offset_t orig_addr;
++#endif /* PAX_ASLR */
+ 	vm_size_t size, pageoff;
+ 	vm_prot_t cap_maxprot, prot, maxprot;
+ 	void *handle;
+@@ -207,6 +215,9 @@ sys_mmap(td, uap)
+ 	cap_rights_t rights;
+ 
+ 	addr = (vm_offset_t) uap->addr;
++#ifdef PAX_ASLR
++	orig_addr = addr;
++#endif /* PAX_ASLR */
+ 	size = uap->len;
+ 	prot = uap->prot & VM_PROT_ALL;
+ 	flags = uap->flags;
+@@ -389,6 +400,9 @@ sys_mmap(td, uap)
+ map:
+ 	td->td_fpop = fp;
+ 	maxprot &= cap_maxprot;
++#ifdef PAX_ASLR
++	pax_aslr_mmap(td, &addr, orig_addr, flags);
++#endif /* PAX_ASLR */
+ 	error = vm_mmap(&vms->vm_map, &addr, size, prot, maxprot,
+ 	    flags, handle_type, handle, pos);
+ 	td->td_fpop = NULL;
+-- 
+1.8.2
+
