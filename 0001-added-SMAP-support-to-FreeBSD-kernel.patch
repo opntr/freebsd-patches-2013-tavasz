@@ -1,9 +1,9 @@
-From e0f2ce7712ed505188d14df2f4b5520b42c11244 Mon Sep 17 00:00:00 2001
+From e4c0e19fde7402a44e9b9c09bde4b3339d63bd4f Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Tue, 16 Apr 2013 01:32:25 +0200
-Subject: [PATCH] Intel SMAP patch for FreeBSD 10-CURRENT
+Subject: [PATCH] added SMAP support to FreeBSD kernel
 
-the trap handler required more review / work
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
 added	void clac(void) and	void stac(void) to cpufunc.h
 
@@ -54,13 +54,17 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 fixed smap trap handler
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+fixed the trap handler 2.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 ---
  sys/amd64/amd64/exception.S     |  6 ++++++
  sys/amd64/amd64/identcpu.c      | 30 ++++++++++++++++++++++++++++++
  sys/amd64/amd64/initcpu.c       | 12 ++++++++----
  sys/amd64/amd64/pmap.c          | 13 +++++++++++++
  sys/amd64/amd64/support.S       | 33 +++++++++++++++++++++++++++++++++
- sys/amd64/amd64/trap.c          |  7 +++++++
+ sys/amd64/amd64/trap.c          | 27 ++++++++++++++++++++-------
  sys/amd64/ia32/ia32_exception.S |  1 +
  sys/amd64/include/asmacros.h    |  3 ++-
  sys/amd64/include/cpufunc.h     | 23 +++++++++++++++++++++++
@@ -68,7 +72,7 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
  sys/conf/NOTES                  |  4 ++++
  sys/conf/options.amd64          |  3 +++
  sys/x86/include/specialreg.h    |  2 ++
- 13 files changed, 146 insertions(+), 5 deletions(-)
+ 13 files changed, 159 insertions(+), 12 deletions(-)
  create mode 100644 sys/amd64/include/smap_instr.h
 
 diff --git a/sys/amd64/amd64/exception.S b/sys/amd64/amd64/exception.S
@@ -404,21 +408,50 @@ index 77dbf63..9c12087 100644
  	ret
  END(copyinstr)
 diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
-index 6fcca81..9a8d585 100644
+index 6fcca81..5bf4ebf 100644
 --- a/sys/amd64/amd64/trap.c
 +++ b/sys/amd64/amd64/trap.c
-@@ -735,7 +735,14 @@ trap_pfault(frame, usermode)
- 	/*
- 	 * PGEX_I is defined only if the execute disable bit capability is
- 	 * supported and enabled.
-+	 * PGEX_P exception delivered only by SMAP
-+	 * see intel 319433-014.pdf 9.3.3
- 	 */
+@@ -718,12 +718,29 @@ trap_pfault(frame, usermode)
+ 
+ 		map = &vm->vm_map;
+ 
 +#ifdef	INTEL_SMAP
-+	if (!usermode && frame->tf_err & PGEX_P) {
-+		goto nogo;
-+	} else
++		/*
++		 * The only case occurs when accessing the address
++		 * without the handler, is a bug, do not try to handle
++		 * it normally, and panic immediately.
++		 * SMAP related.
++		 *
++		 * PGEX_I is defined only if the execute disable bit capability is
++		 * supported and enabled.
++		 * PGEX_P exception delivered only by SMAP
++		 * see intel 319433-014.pdf 9.3.3
++		 */
++		if (curpcb->pcb_onfault == NULL &&
++		    !usermode && frame->tf_err & PGEX_P) {
++			trap_fatal(frame, eva);
++			return (-1);
++		}
 +#endif	/* INTEL_SMAP */
++
+ 		/*
+ 		 * When accessing a usermode address, kernel must be
+ 		 * ready to accept the page fault, and provide a
+-		 * handling routine.  Since accessing the address
+-		 * without the handler is a bug, do not try to handle
+-		 * it normally, and panic immediately.
++		 * handling routine.
+ 		 */
+ 		if (!usermode && (td->td_intr_nesting_level != 0 ||
+ 		    curpcb->pcb_onfault == NULL)) {
+@@ -732,10 +749,6 @@ trap_pfault(frame, usermode)
+ 		}
+ 	}
+ 
+-	/*
+-	 * PGEX_I is defined only if the execute disable bit capability is
+-	 * supported and enabled.
+-	 */
  	if (frame->tf_err & PGEX_W)
  		ftype = VM_PROT_WRITE;
  	else if ((frame->tf_err & PGEX_I) && pg_nx != 0)
