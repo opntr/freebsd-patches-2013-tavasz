@@ -1,4 +1,4 @@
-From e4c0e19fde7402a44e9b9c09bde4b3339d63bd4f Mon Sep 17 00:00:00 2001
+From fabbfd678f4767c93e0dd5ab9807b60e9757c886 Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Tue, 16 Apr 2013 01:32:25 +0200
 Subject: [PATCH] added SMAP support to FreeBSD kernel
@@ -58,13 +58,31 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 fixed the trap handler 2.
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+SMAP - fixed commend in trap.c
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+	modified:   sys/amd64/amd64/exception.S
+	modified:   sys/amd64/amd64/identcpu.c
+	modified:   sys/amd64/amd64/initcpu.c
+	modified:   sys/amd64/amd64/pmap.c
+	modified:   sys/amd64/amd64/support.S
+	modified:   sys/amd64/amd64/trap.c
+	modified:   sys/amd64/ia32/ia32_exception.S
+	modified:   sys/amd64/include/asmacros.h
+	modified:   sys/amd64/include/cpufunc.h
+	new file:   sys/amd64/include/smap_instr.h
+	modified:   sys/conf/NOTES
+	modified:   sys/conf/options.amd64
+	modified:   sys/x86/include/specialreg.h
 ---
  sys/amd64/amd64/exception.S     |  6 ++++++
  sys/amd64/amd64/identcpu.c      | 30 ++++++++++++++++++++++++++++++
  sys/amd64/amd64/initcpu.c       | 12 ++++++++----
  sys/amd64/amd64/pmap.c          | 13 +++++++++++++
  sys/amd64/amd64/support.S       | 33 +++++++++++++++++++++++++++++++++
- sys/amd64/amd64/trap.c          | 27 ++++++++++++++++++++-------
+ sys/amd64/amd64/trap.c          | 21 ++++++++++++++++++---
  sys/amd64/ia32/ia32_exception.S |  1 +
  sys/amd64/include/asmacros.h    |  3 ++-
  sys/amd64/include/cpufunc.h     | 23 +++++++++++++++++++++++
@@ -72,7 +90,7 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
  sys/conf/NOTES                  |  4 ++++
  sys/conf/options.amd64          |  3 +++
  sys/x86/include/specialreg.h    |  2 ++
- 13 files changed, 159 insertions(+), 12 deletions(-)
+ 13 files changed, 157 insertions(+), 8 deletions(-)
  create mode 100644 sys/amd64/include/smap_instr.h
 
 diff --git a/sys/amd64/amd64/exception.S b/sys/amd64/amd64/exception.S
@@ -408,10 +426,10 @@ index 77dbf63..9c12087 100644
  	ret
  END(copyinstr)
 diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
-index 6fcca81..5bf4ebf 100644
+index 6fcca81..fc2d303 100644
 --- a/sys/amd64/amd64/trap.c
 +++ b/sys/amd64/amd64/trap.c
-@@ -718,12 +718,29 @@ trap_pfault(frame, usermode)
+@@ -718,12 +718,27 @@ trap_pfault(frame, usermode)
  
  		map = &vm->vm_map;
  
@@ -422,9 +440,7 @@ index 6fcca81..5bf4ebf 100644
 +		 * it normally, and panic immediately.
 +		 * SMAP related.
 +		 *
-+		 * PGEX_I is defined only if the execute disable bit capability is
-+		 * supported and enabled.
-+		 * PGEX_P exception delivered only by SMAP
++		 * PGEX_P exception delivered only by SMAP.
 +		 * see intel 319433-014.pdf 9.3.3
 +		 */
 +		if (curpcb->pcb_onfault == NULL &&
@@ -444,17 +460,6 @@ index 6fcca81..5bf4ebf 100644
  		 */
  		if (!usermode && (td->td_intr_nesting_level != 0 ||
  		    curpcb->pcb_onfault == NULL)) {
-@@ -732,10 +749,6 @@ trap_pfault(frame, usermode)
- 		}
- 	}
- 
--	/*
--	 * PGEX_I is defined only if the execute disable bit capability is
--	 * supported and enabled.
--	 */
- 	if (frame->tf_err & PGEX_W)
- 		ftype = VM_PROT_WRITE;
- 	else if ((frame->tf_err & PGEX_I) && pg_nx != 0)
 diff --git a/sys/amd64/ia32/ia32_exception.S b/sys/amd64/ia32/ia32_exception.S
 index fe1a676..9f13f2f 100644
 --- a/sys/amd64/ia32/ia32_exception.S
