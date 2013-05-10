@@ -1,0 +1,109 @@
+From 46532ef6f9b84cb5a6a9072c1450366e577f1b2e Mon Sep 17 00:00:00 2001
+From: Oliver Pinter <oliver.pntr@gmail.com>
+Date: Fri, 10 May 2013 04:47:57 +0200
+Subject: [PATCH 2/2] hook in ksp_kpatch
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+---
+ sys/amd64/amd64/machdep.c      | 4 ++++
+ sys/amd64/amd64/pmap.c         | 9 +--------
+ sys/amd64/include/cpufunc.h    | 6 ++++--
+ sys/amd64/include/smap_instr.h | 6 ++++--
+ 4 files changed, 13 insertions(+), 12 deletions(-)
+
+diff --git a/sys/amd64/amd64/machdep.c b/sys/amd64/amd64/machdep.c
+index a543421..74b56a4 100644
+--- a/sys/amd64/amd64/machdep.c
++++ b/sys/amd64/amd64/machdep.c
+@@ -115,6 +115,7 @@ __FBSDID("$FreeBSD$");
+ #include <machine/clock.h>
+ #include <machine/cpu.h>
+ #include <machine/cputypes.h>
++#include <machine/ksp_kpatch.h>
+ #include <machine/intr_machdep.h>
+ #include <x86/mca.h>
+ #include <machine/md_var.h>
+@@ -1800,6 +1801,9 @@ hammer_time(u_int64_t modulep, u_int64_t physfree)
+ 	initializecpu();	/* Initialize CPU registers */
+ 	initializecpucache();
+ 
++	/* patching the kernel text for new instructions */
++	ksp_kpatch();
++
+ 	/* doublefault stack space, runs on ist1 */
+ 	common_tss[0].tss_ist1 = (long)&dblfault_stack[sizeof(dblfault_stack)];
+ 
+diff --git a/sys/amd64/amd64/pmap.c b/sys/amd64/amd64/pmap.c
+index 8fb223a..9847fbe 100644
+--- a/sys/amd64/amd64/pmap.c
++++ b/sys/amd64/amd64/pmap.c
+@@ -666,16 +666,9 @@ pmap_bootstrap(vm_paddr_t *firstaddr)
+ 	if (cpu_stdext_feature & CPUID_STDEXT_SMEP)
+ 		load_cr4(rcr4() | CR4_SMEP);
+ 
+-	if (cpu_stdext_feature & CPUID_STDEXT_SMAP)
+ #ifdef	INTEL_SMAP
++	if (cpu_stdext_feature & CPUID_STDEXT_SMAP)
+ 		load_cr4(rcr4() | CR4_SMAP);
+-	else
+-		panic("The kernel compiled with \"options INTEL_SMAP\","
+-			       	"but your CPU doesn't support SMAP!\n");
+-#else	/* !INTEL_SMAP */
+-		printf("Your CPU has support for SMAP security feature. "
+-			"You should recompile the kernel with "
+-			"\"options INTEL_SMAP\" to use them.\n");
+ #endif	/* INTEL_SMAP */
+ 
+ 	/*
+diff --git a/sys/amd64/include/cpufunc.h b/sys/amd64/include/cpufunc.h
+index f959d0b..3b19b8e 100644
+--- a/sys/amd64/include/cpufunc.h
++++ b/sys/amd64/include/cpufunc.h
+@@ -45,6 +45,8 @@
+ #error this file needs sys/cdefs.h as a prerequisite
+ #endif
+ 
++#include <machine/smap_instr.h>
++
+ struct region_descriptor;
+ 
+ #define readb(va)	(*(volatile uint8_t *) (va))
+@@ -720,7 +722,7 @@ static __inline void
+ clac(void)
+ {
+ #ifdef	INTEL_SMAP
+-	__asm __volatile(".byte x0f,0x01,0xca" : : :);
++	__asm __volatile(__STRING(CLAC) : : :);
+ #endif	/* INTEL_SMAP */
+ }
+ 
+@@ -728,7 +730,7 @@ static __inline void
+ stac(void)
+ {
+ #ifdef	INTEL_SMAP
+-	__asm __volatile(".byte x0f,0x01,0xcb" : : :);
++	__asm __volatile(__STRING(STAC) : : :);
+ #endif	/* INTEL_SMAP */
+ }
+ 
+diff --git a/sys/amd64/include/smap_instr.h b/sys/amd64/include/smap_instr.h
+index 5722bbf..518748d 100644
+--- a/sys/amd64/include/smap_instr.h
++++ b/sys/amd64/include/smap_instr.h
+@@ -3,9 +3,11 @@
+ 
+ #include "opt_cpu.h"
+ 
++#include <machine/ksp_kpatch_smap.h>
++
+ #ifdef	INTEL_SMAP
+-#define	CLAC	.byte 0x0f,0x01,0xca
+-#define	STAC	.byte 0x0f,0x01,0xcb
++#define	CLAC	_ksp_kpatch_clac
++#define	STAC	_ksp_kpatch_stac
+ #else	/* INTEL_SMAP_SUPPORT */
+ #define	CLAC
+ #define	STAC
+-- 
+1.8.2
+

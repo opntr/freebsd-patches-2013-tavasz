@@ -1,0 +1,579 @@
+From caedf966b5a10523954f2459ba43a62ed401eabb Mon Sep 17 00:00:00 2001
+From: Oliver Pinter <oliver.pntr@gmail.com>
+Date: Fri, 10 May 2013 04:20:13 +0200
+Subject: [PATCH 1/2] added ksp_kpatch framework
+
+This framework provided a boot time kernel patching mechanizm.
+
+The patching depends on a condition, these include the following:
+* cpu feature status words:
+	- CPU_FEATURE
+	- CPU_FEATURE2
+	- AMD_FEATURE
+	- AMD_FEATURE2
+	- VIA_FEATURE_RNG
+	- VIA_FEATURE_XCRYPT
+	- CPU_STDEXT_FEATURE
+* and feature bit, which defined in sys/x86/include/specialreg.h
+
+usage example:
+
+\#define _ksp_kpatch_clac                                               \
+89071:                                                                  \
+        .byte 0x0f,0x1f,0x00 ;                  /* patchable - nop */   \
+89072:                                                                  \
+        .pushsection set_ksp_kpatch_set, "a" ;                          \
+                .quad   89071b ;                /* &patchable */        \
+                .quad   89073f ;                /* &patch */            \
+                .int    CPUID_STDEXT_SMAP ;     /* feature_bit*/        \
+                .word   CPU_STDEXT_FEATURE ;                            \
+                .byte   89072b-89071b ;                                 \
+                .byte   89074f-89073f ;                                 \
+        .popsection ;                                                   \
+        .pushsection set_ksp_kpatch_patch_set, "ax" ;                   \
+89073:                                                                  \
+                .byte 0x0f,0x01,0xca ;          /* patch - clac */      \
+89074:                                                                  \
+        .popsection
+
+This defined a ksp_kpatch, in initial state, the original location of
+binary contained a multi byte nop, and when a contition matched, then
+overwrited by the patch, in this case the byte series of clac.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+---
+ sys/amd64/amd64/ksp_kpatch.c                | 170 ++++++++++++++++++++++++++++
+ sys/amd64/include/ksp_kpatch.h              |  58 ++++++++++
+ sys/amd64/include/ksp_kpatch_asmacros.h     |  55 +++++++++
+ sys/amd64/include/ksp_kpatch_common.h       |  40 +++++++
+ sys/amd64/include/ksp_kpatch_instructions.h |  65 +++++++++++
+ sys/amd64/include/ksp_kpatch_smap.h         |  69 +++++++++++
+ sys/conf/files.amd64                        |   1 +
+ sys/conf/options.amd64                      |   3 +
+ 8 files changed, 461 insertions(+)
+ create mode 100644 sys/amd64/amd64/ksp_kpatch.c
+ create mode 100644 sys/amd64/include/ksp_kpatch.h
+ create mode 100644 sys/amd64/include/ksp_kpatch_asmacros.h
+ create mode 100644 sys/amd64/include/ksp_kpatch_common.h
+ create mode 100644 sys/amd64/include/ksp_kpatch_instructions.h
+ create mode 100644 sys/amd64/include/ksp_kpatch_smap.h
+
+diff --git a/sys/amd64/amd64/ksp_kpatch.c b/sys/amd64/amd64/ksp_kpatch.c
+new file mode 100644
+index 0000000..4dce844
+--- /dev/null
++++ b/sys/amd64/amd64/ksp_kpatch.c
+@@ -0,0 +1,170 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#include <sys/cdefs.h>
++/* #include <sys/linker_set.h> */
++#include <sys/param.h>
++#include <sys/systm.h>
++
++#include <machine/cpufunc.h>
++#include <machine/ksp_kpatch.h>
++#include <machine/ksp_kpatch_common.h>
++#include <machine/ksp_kpatch_instructions.h>
++#include <machine/md_var.h>
++#include <machine/specialreg.h>
++
++const unsigned char intelnops[] = {
++	INTEL_NOP1,
++	INTEL_NOP2,
++	INTEL_NOP3,
++	INTEL_NOP4,
++	INTEL_NOP5,
++	INTEL_NOP6,
++	INTEL_NOP7,
++	INTEL_NOP8,
++	INTEL_NOP9
++};
++
++const unsigned char * const intel_nops[INTEL_NOP_MAX + 1] = {
++	NULL,
++	&intelnops[1],
++	&intelnops[2],
++	&intelnops[3],
++	&intelnops[4],
++	&intelnops[5],
++	&intelnops[6],
++	&intelnops[7],
++	&intelnops[8],
++	&intelnops[9]
++};
++
++extern struct ksp_kpatch  __start_set_ksp_kpatch_set[];
++extern struct ksp_kpatch  __stop_set_ksp_kpatch_set[];
++
++static void
++ksp_pad_with_nops(void *_buffer, unsigned int len)
++{
++	unsigned int	nop_len;
++	unsigned char	*buffer=_buffer;
++
++	while (len > 0) {
++		nop_len=(len > INTEL_NOP_MAX) ? INTEL_NOP_MAX : len;
++		memcpy(buffer, intel_nops[nop_len], nop_len);
++		buffer += nop_len;
++		len -= nop_len;
++	}
++}
++
++void
++ksp_kpatch_apply(struct ksp_kpatch *patch)
++{
++	__uint8_t		patch_buffer[KSP_KPATCH_MAXLEN];
++	int			patch_needed=0;
++
++	dprintf("ksp_kpatch: patch start at 0x%016lx\n", (long)patch);
++	dprintf("ksp_kpatch: patch_size: %d - patchable size: %d ...\n",
++				patch->patch_size, patch->patchable_size);
++	KASSERT(patch->patch_size == patch->patchable_size,
++				("ksp_kpatch: patch size > patchable size\n"));
++
++	switch (patch->feature_selector) {
++	case	CPU_FEATURE:
++			if ((cpu_feature & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	case	CPU_FEATURE2:
++			if ((cpu_feature2 & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	case	AMD_FEATURE:
++			if ((amd_feature & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	case	AMD_FEATURE2:
++			if ((amd_feature2 & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	case	VIA_FEATURE_RNG:
++			if ((via_feature_rng & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	case	VIA_FEATURE_XCRYPT:
++			if ((via_feature_xcrypt & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	case	CPU_STDEXT_FEATURE:
++			if ((cpu_stdext_feature & patch->feature_bit) != 0)
++				patch_needed=1;
++			break;
++	default:
++			dprintf("ksp_kpatch: no matching selector word\n");
++			patch_needed=0;
++			return;
++	}
++	if (patch_needed != 1) {
++		dprintf("ksp_kpatch: skipping patch at 0x%016lx", (long)patch);
++
++		return;
++	}
++
++	dprintf("ksp_kpatch: apply patch ...");
++	memcpy(patch_buffer, patch->patch_address, patch->patch_size);
++	ksp_pad_with_nops(patch_buffer,
++			patch->patchable_size-patch->patch_size);
++
++	/*
++	 * Write the previouly assembled instraction patch
++	 */
++	memcpy(patch->patchable_address, patch_buffer, patch->patchable_size);
++}
++
++void
++ksp_kpatch(void)
++{
++	struct ksp_kpatch	*patch, *start, *stop;
++	int			patch_count;
++
++	start=__start_set_ksp_kpatch_set;
++	stop=__stop_set_ksp_kpatch_set;
++
++	patch_count=stop-start;
++	if (patch_count == 0) {
++		dprintf("ksp_kpatch: no patches\n");
++		dprintf("ksp_kpatch: skip kernel patching\n");
++
++		return;
++	}
++	dprintf("ksp_kpatch: patch count	: %d\n", patch_count);
++	dprintf("ksp_kpatch: patch set start	: 0x%016lx\n", (long)start);
++	dprintf("ksp_kpatch: patch set end  	: 0x%016lx\n", (long)stop);
++	for (patch=start; patch<stop; patch++) {
++		dprintf("ksp_kpatch_set: try patch at 0x%016lx\n",
++								(long)patch);
++		ksp_kpatch_apply(patch);
++	}
++}
++
+diff --git a/sys/amd64/include/ksp_kpatch.h b/sys/amd64/include/ksp_kpatch.h
+new file mode 100644
+index 0000000..fb7b099
+--- /dev/null
++++ b/sys/amd64/include/ksp_kpatch.h
+@@ -0,0 +1,58 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#include "opt_ksp.h"
++
++#ifndef	__KSP_KPATCH_H
++#define	__KSP_KPATCH_H
++
++#include <sys/types.h> /* this included cdefs.h too */
++/* #include <sys/linker_set.h> */
++
++#include <machine/ksp_kpatch_common.h>
++
++#ifdef	KSP_KPATCH_DEBUG
++#define	dprintf	printf
++#else	/* KSP_KPATCH_DEBUG */
++#define	dprintf(args...)
++#endif	/* KSP_KPATCH_DEBUG */
++
++struct ksp_kpatch {
++	char	*patchable_address;	/* 64 bit */
++	char	*patch_address;		/* 64 bit */
++	u_int	feature_bit;		/* 32 bit */
++	u_short	feature_selector;	/* 16 bit */
++	u_char	patchable_size;		/*  8 bit */
++	u_char	patch_size;		/*  8 bit */
++};
++
++#define	KSP_KPATCH_MAXLEN	256	/* 8 bit */
++
++extern void ksp_kpatch(void);
++extern void ksp_kpatch_apply(struct ksp_kpatch *patch);
++
++#endif	/* __KSP_KPATCH_H */
+diff --git a/sys/amd64/include/ksp_kpatch_asmacros.h b/sys/amd64/include/ksp_kpatch_asmacros.h
+new file mode 100644
+index 0000000..825d787
+--- /dev/null
++++ b/sys/amd64/include/ksp_kpatch_asmacros.h
+@@ -0,0 +1,55 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#ifndef	__KSP_KPATCH_ASMACROS_H
++#define	__KSP_KPATCH_ASMACROS_H
++
++#include <sys/cdefs.h>
++
++#include <machine/ksp_kpatch_common.h>
++#include <machine/ksp_kpatch_instructions.h>
++#include <machine/specialreg.h>
++
++#define	KSP_KPATCH(patchable, patch, feature_bit, selector)		\
++89071:									\
++	patchable ;		/* patchable opcodes */			\
++89072:									\
++	.pushsection set_ksp_kpatch_set, "a" ;				\
++		.quad	89701b ;		/* &patchable */	\
++		.quad	89073f ;		/* &patch */		\
++		.int	feature_bit ;		/* feature_bit*/	\
++		.word	selector ;					\
++		.byte	89072b-89071b ;					\
++		.byte	89074f-89073f ;					\
++	.popsection ;							\
++	.pushsection set_ksp_kpatch_patch_set, "ax" ;			\
++89073:									\
++		patch ;		/* opcode paches */			\
++89074:									\
++	.popsection
++
++#endif	/* __KSP_KPATCH_ASMACROS_H */
+diff --git a/sys/amd64/include/ksp_kpatch_common.h b/sys/amd64/include/ksp_kpatch_common.h
+new file mode 100644
+index 0000000..7d90e11
+--- /dev/null
++++ b/sys/amd64/include/ksp_kpatch_common.h
+@@ -0,0 +1,40 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#ifndef	__KSP_KPATCH_COMMON_H
++#define	__KSP_KPATCH_COMMON_H
++
++#define	KSP_HACK		0
++#define	CPU_FEATURE		1
++#define	CPU_FEATURE2		2
++#define	AMD_FEATURE		3
++#define	AMD_FEATURE2		4
++#define	VIA_FEATURE_RNG		5
++#define	VIA_FEATURE_XCRYPT	6
++#define	CPU_STDEXT_FEATURE	7
++
++#endif	/* __KSP_KPATCH_COMMON_H */
+diff --git a/sys/amd64/include/ksp_kpatch_instructions.h b/sys/amd64/include/ksp_kpatch_instructions.h
+new file mode 100644
+index 0000000..1125267
+--- /dev/null
++++ b/sys/amd64/include/ksp_kpatch_instructions.h
+@@ -0,0 +1,65 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#ifndef __KSP_KPATCH_INSTRUCTIONS_H
++#define	__KSP_KPATCH_INSTRUCTIONS_H
++
++/*
++ * Intel Instruction Set Reference M-Z
++ * Table 4-12. recommended Multi-Byte Sequeance of NOP Instruction
++ */
++#define	INTEL_NOP1	0x90
++#define	INTEL_NOP2	0x66,0x90
++#define	INTEL_NOP3	0x0f,0x1f,0x00
++#define	INTEL_NOP4	0x0f,0x1f,0x40,0x00
++#define	INTEL_NOP5	0x0f,0x1f,0x44,0x00,0x00
++#define	INTEL_NOP6	0x66,0x0f,0x1f,0x44,0x00,0x00
++#define	INTEL_NOP7	0x0f,0x1f,0x80,0x00,0x00,0x00,0x00
++#define	INTEL_NOP8	0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
++#define	INTEL_NOP9	0x66,0x0f,0x1f,0x84,0x00,0x00,0x00,0x00,0x00
++
++#define	INTEL_NOP_MAX	9
++
++#define	INTEL_CLAC	0x0f,0x01,0xca
++#define	INTEL_STAC	0x0f,0x01,0xcb
++
++#define	__ASM_MK(_O)	.byte _O
++
++#define	ASM_INTEL_NOP1	__ASM_MK(INTEL_NOP1)
++#define	ASM_INTEL_NOP2	__ASM_MK(INTEL_NOP2)
++#define	ASM_INTEL_NOP3	__ASM_MK(INTEL_NOP3)
++#define	ASM_INTEL_NOP4	__ASM_MK(INTEL_NOP4)
++#define	ASM_INTEL_NOP5	__ASM_MK(INTEL_NOP5)
++#define	ASM_INTEL_NOP6	__ASM_MK(INTEL_NOP6)
++#define	ASM_INTEL_NOP7	__ASM_MK(INTEL_NOP7)
++#define	ASM_INTEL_NOP8	__ASM_MK(INTEL_NOP8)
++#define	ASM_INTEL_NOP9	__ASM_MK(INTEL_NOP9)
++
++#define	ASM_INTEL_CLAC	__ASM_MK(INTEL_CLAC)
++#define	ASM_INTEL_STAC	__ASM_MK(INTEL_STAC)
++
++#endif	/* __KSP_KPATCH_INSTRUCTIONS_H */
+diff --git a/sys/amd64/include/ksp_kpatch_smap.h b/sys/amd64/include/ksp_kpatch_smap.h
+new file mode 100644
+index 0000000..dd5a609
+--- /dev/null
++++ b/sys/amd64/include/ksp_kpatch_smap.h
+@@ -0,0 +1,69 @@
++/*-
++ * Copyright (c) 2013, by Oliver Pinter <oliver.pntr at gmail.com>
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. The name of the developer may NOT be used to endorse or promote products
++ *    derived from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
++ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
++ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
++ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
++ * SUCH DAMAGE.
++ *
++ * $FreeBSD$
++ */
++
++#ifndef	__KSP_KPATCH_SMAP_H
++#define	__KSP_KPATCH_SMAP_H
++
++#include <machine/ksp_kpatch_asmacros.h>
++
++#define	_ksp_kpatch_clac						\
++89071:									\
++	.byte 0x0f,0x1f,0x00 ;			/* patchable - nop */	\
++89072:									\
++	.pushsection set_ksp_kpatch_set, "a" ;				\
++		.quad	89071b ;		/* &patchable */	\
++		.quad	89073f ;		/* &patch */		\
++		.int	CPUID_STDEXT_SMAP ;	/* feature_bit*/	\
++		.word	CPU_STDEXT_FEATURE ;				\
++		.byte	89072b-89071b ;					\
++		.byte	89074f-89073f ;					\
++	.popsection ;							\
++	.pushsection set_ksp_kpatch_patch_set, "ax" ;			\
++89073:									\
++		.byte 0x0f,0x01,0xca ;		/* patch - clac */	\
++89074:									\
++	.popsection
++
++#define	_ksp_kpatch_stac						\
++89071:									\
++	.byte 0x0f,0x1f,0x00 ;			/* patchable - nop */	\
++89072:									\
++	.pushsection set_ksp_kpatch_set, "a" ;				\
++		.quad	89071b ;		/* &patchable */	\
++		.quad	89073f ;		/* &patch */		\
++		.int	CPUID_STDEXT_SMAP ;	/* feature_bit*/	\
++		.word	CPU_STDEXT_FEATURE ;				\
++		.byte	89072b-89071b ;					\
++		.byte	89074f-89073f ;					\
++	.popsection ;							\
++	.pushsection set_ksp_kpatch_patch_set, "ax" ;			\
++89073:									\
++		.byte 0x0f,0x01,0xcb ;		/* patch - stac */	\
++89074:									\
++	.popsection
++
++#endif	/* __KSP_KPATCH_SMAP_H */
+diff --git a/sys/conf/files.amd64 b/sys/conf/files.amd64
+index 2d6db7a..fc4b0cf 100644
+--- a/sys/conf/files.amd64
++++ b/sys/conf/files.amd64
+@@ -111,6 +111,7 @@ amd64/amd64/identcpu.c		standard
+ amd64/amd64/in_cksum.c		optional	inet | inet6
+ amd64/amd64/initcpu.c		standard
+ amd64/amd64/io.c		optional	io
++amd64/amd64/ksp_kpatch.c	standard
+ amd64/amd64/locore.S		standard	no-obj
+ amd64/amd64/machdep.c		standard
+ amd64/amd64/mem.c		optional	mem
+diff --git a/sys/conf/options.amd64 b/sys/conf/options.amd64
+index 8b4436e..eaedaf9 100644
+--- a/sys/conf/options.amd64
++++ b/sys/conf/options.amd64
+@@ -75,3 +75,6 @@ RDRAND_RNG		opt_cpu.h
+ 
+ # Intel supervisor mode access prevention (SMAP)
+ INTEL_SMAP		opt_cpu.h
++
++# kernel self protection - ksp
++KSP_DEBUG		opt_ksp.h
+-- 
+1.8.2
+
