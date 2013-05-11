@@ -1,4 +1,4 @@
-From 7173d40ac81018d86624eb36a2cf5e465b0a0742 Mon Sep 17 00:00:00 2001
+From c8ee734cc925d086aa6883a19a97fbe9851bd362 Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Tue, 16 Apr 2013 01:32:25 +0200
 Subject: [PATCH] added SMAP support for FreeBSD against r250423
@@ -62,25 +62,63 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 SMAP - fixed commend in trap.c
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+Clear the RFLAGS.AC on the start of nmi handler
+
+suggested by kib@:
+> I think that NMI handler should have CLAC executed unconditionally and
+> much earlier then it is done in your patch. Since NMI could interrupt
+> the copy*() functions, you would get some kernel code unneccessary
+> executing with SMAP off.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+added note to fault handlers related to SMAP
+
+suggested by kib@:
+> I believe that exception labels in the support.S, like copyout_fault
+> etc
+> deserve a comment describing that EFLAGS.AC bit gets cleared by the
+> exception entry point before the control reaches the label.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+retored original comment in trap.c
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+style(9) and spelling fixes
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+explicitly check the SMAP error codes, and not the existence of PGEX_P bit
+
+suggested by kib@:
+> The trap_pfault() fragment should check for the error code equal to 1
+> or
+> 3, as described in the 9.3.3, instead of only checking for the present
+> bit set.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 ---
  sys/amd64/amd64/exception.S     |  6 ++++++
- sys/amd64/amd64/identcpu.c      | 28 +++++++++++++++++++++++++---
- sys/amd64/amd64/initcpu.c       | 12 ++++++++----
- sys/amd64/amd64/pmap.c          | 13 +++++++++++++
- sys/amd64/amd64/support.S       | 33 +++++++++++++++++++++++++++++++++
- sys/amd64/amd64/trap.c          | 21 ++++++++++++++++++---
+ sys/amd64/amd64/identcpu.c      | 28 +++++++++++++++++++++---
+ sys/amd64/amd64/initcpu.c       | 12 +++++++----
+ sys/amd64/amd64/pmap.c          | 13 +++++++++++
+ sys/amd64/amd64/support.S       | 48 +++++++++++++++++++++++++++++++++++++++++
+ sys/amd64/amd64/trap.c          | 18 ++++++++++++++++
  sys/amd64/ia32/ia32_exception.S |  1 +
  sys/amd64/include/asmacros.h    |  3 ++-
- sys/amd64/include/cpufunc.h     | 23 +++++++++++++++++++++++
- sys/amd64/include/smap_instr.h  | 14 ++++++++++++++
+ sys/amd64/include/cpufunc.h     | 23 ++++++++++++++++++++
+ sys/amd64/include/smap_instr.h  | 14 ++++++++++++
  sys/conf/NOTES                  |  4 ++++
  sys/conf/options.amd64          |  3 +++
  sys/x86/include/specialreg.h    |  1 +
- 13 files changed, 151 insertions(+), 11 deletions(-)
+ 13 files changed, 166 insertions(+), 8 deletions(-)
  create mode 100644 sys/amd64/include/smap_instr.h
 
 diff --git a/sys/amd64/amd64/exception.S b/sys/amd64/amd64/exception.S
-index 89ad638..2956efc 100644
+index 89ad638..d7ed7e4 100644
 --- a/sys/amd64/amd64/exception.S
 +++ b/sys/amd64/amd64/exception.S
 @@ -42,6 +42,7 @@
@@ -115,14 +153,14 @@ index 89ad638..2956efc 100644
  	FAKE_MCOUNT(TF_RIP(%rsp))
  	movq	PCPU(CURTHREAD),%rdi
  	movq	%rsp,TD_FRAME(%rdi)
-@@ -474,6 +478,7 @@ IDTVEC(nmi)
- 	movw	%ds,TF_DS(%rsp)
- 	movl	$TF_HASSEGS,TF_FLAGS(%rsp)
- 	cld
+@@ -449,6 +453,7 @@ IDTVEC(fast_syscall32)
+  */
+ 
+ IDTVEC(nmi)
 +	CLAC
- 	xorl	%ebx,%ebx
- 	testb	$SEL_RPL_MASK,TF_CS(%rsp)
- 	jnz	nmi_fromuserspace
+ 	subq	$TF_RIP,%rsp
+ 	movl	$(T_NMI),TF_TRAPNO(%rsp)
+ 	movq	$0,TF_ADDR(%rsp)
 @@ -533,6 +538,7 @@ nmi_calltrap:
  
  	shrq	$3,%rcx		/* trap frame size in long words */
@@ -132,7 +170,7 @@ index 89ad638..2956efc 100644
  	movsq			/* copy trapframe */
  
 diff --git a/sys/amd64/amd64/identcpu.c b/sys/amd64/amd64/identcpu.c
-index ec5a2aa..856223d 100644
+index ec5a2aa..90495eb 100644
 --- a/sys/amd64/amd64/identcpu.c
 +++ b/sys/amd64/amd64/identcpu.c
 @@ -391,12 +391,14 @@ printcpuinfo(void)
@@ -187,14 +225,14 @@ index ec5a2aa..856223d 100644
  		if (cpu_feature2 & CPUID2_HV) {
  			cpu_stdext_disable = CPUID_STDEXT_FSGSBASE |
  			    CPUID_STDEXT_SMEP;
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +			cpu_stdext_disable |= CPUID_STDEXT_SMAP;
-+#endif	/* INTEL_SMAP */
++#endif
  		} else
  			cpu_stdext_disable = 0;
  		TUNABLE_INT_FETCH("hw.cpu_stdext_disable", &cpu_stdext_disable);
 diff --git a/sys/amd64/amd64/initcpu.c b/sys/amd64/amd64/initcpu.c
-index 4abed4c..1f0ae6c 100644
+index 4abed4c..fbfa7c3 100644
 --- a/sys/amd64/amd64/initcpu.c
 +++ b/sys/amd64/amd64/initcpu.c
 @@ -165,13 +165,17 @@ initializecpu(void)
@@ -212,15 +250,15 @@ index 4abed4c..1f0ae6c 100644
  	 */
  	if (!IS_BSP() && (cpu_stdext_feature & CPUID_STDEXT_SMEP))
  		cr4 |= CR4_SMEP;
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +	if (!IS_BSP() && (cpu_stdext_feature & CPUID_STDEXT_SMAP))
 +		cr4 |= CR4_SMAP;
-+#endif	/* INTEL_SMAP */
++#endif
  	load_cr4(cr4);
  	if ((amd_feature & AMDID_NX) != 0) {
  		msr = rdmsr(MSR_EFER) | EFER_NXE;
 diff --git a/sys/amd64/amd64/pmap.c b/sys/amd64/amd64/pmap.c
-index 1b1c86c..8fb223a 100644
+index 1b1c86c..11e560d 100644
 --- a/sys/amd64/amd64/pmap.c
 +++ b/sys/amd64/amd64/pmap.c
 @@ -98,6 +98,7 @@ __FBSDID("$FreeBSD$");
@@ -236,22 +274,22 @@ index 1b1c86c..8fb223a 100644
  		load_cr4(rcr4() | CR4_SMEP);
  
 +	if (cpu_stdext_feature & CPUID_STDEXT_SMAP)
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +		load_cr4(rcr4() | CR4_SMAP);
 +	else
 +		panic("The kernel compiled with \"options INTEL_SMAP\","
 +			       	"but your CPU doesn't support SMAP!\n");
-+#else	/* !INTEL_SMAP */
++#else
 +		printf("Your CPU has support for SMAP security feature. "
 +			"You should recompile the kernel with "
 +			"\"options INTEL_SMAP\" to use them.\n");
-+#endif	/* INTEL_SMAP */
++#endif
 +
  	/*
  	 * Initialize the kernel pmap (which is statically allocated).
  	 */
 diff --git a/sys/amd64/amd64/support.S b/sys/amd64/amd64/support.S
-index 77dbf63..9c12087 100644
+index 77dbf63..7ad8101 100644
 --- a/sys/amd64/amd64/support.S
 +++ b/sys/amd64/amd64/support.S
 @@ -35,6 +35,7 @@
@@ -279,7 +317,19 @@ index 77dbf63..9c12087 100644
  
  done_copyout:
  	xorl	%eax,%eax
-@@ -290,12 +295,16 @@ ENTRY(copyin)
+@@ -258,6 +263,11 @@ done_copyout:
+ 	ret
+ 
+ 	ALIGN_TEXT
++/*
++ * note:
++ * When SMAP enabled, the EFLAGS.AC bit gets cleared before control reaches
++ * the fault handler.
++ */ 
+ copyout_fault:
+ 	movq	PCPU(CURPCB),%rdx
+ 	movq	$0,PCB_ONFAULT(%rdx)
+@@ -290,12 +300,16 @@ ENTRY(copyin)
  	movb	%cl,%al
  	shrq	$3,%rcx				/* copy longword-wise */
  	cld
@@ -296,7 +346,19 @@ index 77dbf63..9c12087 100644
  
  done_copyin:
  	xorl	%eax,%eax
-@@ -324,10 +333,12 @@ ENTRY(casuword32)
+@@ -304,6 +318,11 @@ done_copyin:
+ 	ret
+ 
+ 	ALIGN_TEXT
++/*
++ * note:
++ * When SMAP enabled, the EFLAGS.AC bit gets cleared before control reaches
++ * the fault handler.
++ */ 
+ copyin_fault:
+ 	movq	PCPU(CURPCB),%rdx
+ 	movq	$0,PCB_ONFAULT(%rdx)
+@@ -324,10 +343,12 @@ ENTRY(casuword32)
  	ja	fusufault
  
  	movl	%esi,%eax			/* old */
@@ -309,7 +371,7 @@ index 77dbf63..9c12087 100644
  
  	/*
  	 * The old value is in %eax.  If the store succeeded it will be the
-@@ -353,10 +364,12 @@ ENTRY(casuword)
+@@ -353,10 +374,12 @@ ENTRY(casuword)
  	ja	fusufault
  
  	movq	%rsi,%rax			/* old */
@@ -322,7 +384,7 @@ index 77dbf63..9c12087 100644
  
  	/*
  	 * The old value is in %eax.  If the store succeeded it will be the
-@@ -385,7 +398,9 @@ ENTRY(fuword)
+@@ -385,7 +408,9 @@ ENTRY(fuword)
  	cmpq	%rax,%rdi			/* verify address is valid */
  	ja	fusufault
  
@@ -332,7 +394,7 @@ index 77dbf63..9c12087 100644
  	movq	$0,PCB_ONFAULT(%rcx)
  	ret
  END(fuword64)	
-@@ -399,7 +414,9 @@ ENTRY(fuword32)
+@@ -399,7 +424,9 @@ ENTRY(fuword32)
  	cmpq	%rax,%rdi			/* verify address is valid */
  	ja	fusufault
  
@@ -342,7 +404,7 @@ index 77dbf63..9c12087 100644
  	movq	$0,PCB_ONFAULT(%rcx)
  	ret
  END(fuword32)
-@@ -426,7 +443,9 @@ ENTRY(fuword16)
+@@ -426,7 +453,9 @@ ENTRY(fuword16)
  	cmpq	%rax,%rdi
  	ja	fusufault
  
@@ -352,7 +414,7 @@ index 77dbf63..9c12087 100644
  	movq	$0,PCB_ONFAULT(%rcx)
  	ret
  END(fuword16)
-@@ -439,7 +458,9 @@ ENTRY(fubyte)
+@@ -439,12 +468,19 @@ ENTRY(fubyte)
  	cmpq	%rax,%rdi
  	ja	fusufault
  
@@ -362,7 +424,17 @@ index 77dbf63..9c12087 100644
  	movq	$0,PCB_ONFAULT(%rcx)
  	ret
  END(fubyte)
-@@ -466,7 +487,9 @@ ENTRY(suword)
+ 
+ 	ALIGN_TEXT
++/*
++ * note:
++ * When SMAP enabled, the EFLAGS.AC bit gets cleared before control reaches
++ * the fault handler.
++ */ 
+ fusufault:
+ 	movq	PCPU(CURPCB),%rcx
+ 	xorl	%eax,%eax
+@@ -466,7 +502,9 @@ ENTRY(suword)
  	cmpq	%rax,%rdi			/* verify address validity */
  	ja	fusufault
  
@@ -372,7 +444,7 @@ index 77dbf63..9c12087 100644
  	xorl	%eax,%eax
  	movq	PCPU(CURPCB),%rcx
  	movq	%rax,PCB_ONFAULT(%rcx)
-@@ -482,7 +505,9 @@ ENTRY(suword32)
+@@ -482,7 +520,9 @@ ENTRY(suword32)
  	cmpq	%rax,%rdi			/* verify address validity */
  	ja	fusufault
  
@@ -382,7 +454,7 @@ index 77dbf63..9c12087 100644
  	xorl	%eax,%eax
  	movq	PCPU(CURPCB),%rcx
  	movq	%rax,PCB_ONFAULT(%rcx)
-@@ -497,7 +522,9 @@ ENTRY(suword16)
+@@ -497,7 +537,9 @@ ENTRY(suword16)
  	cmpq	%rax,%rdi			/* verify address validity */
  	ja	fusufault
  
@@ -392,7 +464,7 @@ index 77dbf63..9c12087 100644
  	xorl	%eax,%eax
  	movq	PCPU(CURPCB),%rcx		/* restore trashed register */
  	movq	%rax,PCB_ONFAULT(%rcx)
-@@ -513,7 +540,9 @@ ENTRY(subyte)
+@@ -513,7 +555,9 @@ ENTRY(subyte)
  	ja	fusufault
  
  	movl	%esi,%eax
@@ -402,7 +474,7 @@ index 77dbf63..9c12087 100644
  	xorl	%eax,%eax
  	movq	PCPU(CURPCB),%rcx		/* restore trashed register */
  	movq	%rax,PCB_ONFAULT(%rcx)
-@@ -555,7 +584,9 @@ ENTRY(copyinstr)
+@@ -555,7 +599,9 @@ ENTRY(copyinstr)
  	decq	%rdx
  	jz	3f
  
@@ -412,7 +484,7 @@ index 77dbf63..9c12087 100644
  	stosb
  	orb	%al,%al
  	jnz	2b
-@@ -584,7 +615,9 @@ cpystrflt_x:
+@@ -584,7 +630,9 @@ cpystrflt_x:
  	testq	%r9,%r9
  	jz	1f
  	subq	%rdx,%r8
@@ -423,14 +495,14 @@ index 77dbf63..9c12087 100644
  	ret
  END(copyinstr)
 diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
-index 6fcca81..fc2d303 100644
+index 6fcca81..bb95b08 100644
 --- a/sys/amd64/amd64/trap.c
 +++ b/sys/amd64/amd64/trap.c
-@@ -718,12 +718,27 @@ trap_pfault(frame, usermode)
+@@ -718,6 +718,24 @@ trap_pfault(frame, usermode)
  
  		map = &vm->vm_map;
  
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +		/*
 +		 * The only case occurs when accessing the address
 +		 * without the handler, is a bug, do not try to handle
@@ -440,23 +512,17 @@ index 6fcca81..fc2d303 100644
 +		 * PGEX_P exception delivered only by SMAP.
 +		 * see intel 319433-014.pdf 9.3.3
 +		 */
-+		if (curpcb->pcb_onfault == NULL &&
-+		    !usermode && frame->tf_err & PGEX_P) {
++		if (!usermode && curpcb->pcb_onfault == NULL &&
++		    (frame->tf_err == PGEX_P ||
++		     frame->tf_err == (PGEX_P | PGEX_W))) {
 +			trap_fatal(frame, eva);
 +			return (-1);
 +		}
-+#endif	/* INTEL_SMAP */
++#endif
 +
  		/*
  		 * When accessing a usermode address, kernel must be
  		 * ready to accept the page fault, and provide a
--		 * handling routine.  Since accessing the address
--		 * without the handler is a bug, do not try to handle
--		 * it normally, and panic immediately.
-+		 * handling routine.
- 		 */
- 		if (!usermode && (td->td_intr_nesting_level != 0 ||
- 		    curpcb->pcb_onfault == NULL)) {
 diff --git a/sys/amd64/ia32/ia32_exception.S b/sys/amd64/ia32/ia32_exception.S
 index fe1a676..9f13f2f 100644
 --- a/sys/amd64/ia32/ia32_exception.S
@@ -484,7 +550,7 @@ index 1fb592a..c985623 100644
  #define POP_FRAME							\
  	movq	TF_RDI(%rsp),%rdi ;					\
 diff --git a/sys/amd64/include/cpufunc.h b/sys/amd64/include/cpufunc.h
-index 881fcd2..f959d0b 100644
+index 881fcd2..fd9f95b 100644
 --- a/sys/amd64/include/cpufunc.h
 +++ b/sys/amd64/include/cpufunc.h
 @@ -39,6 +39,8 @@
@@ -506,17 +572,17 @@ index 881fcd2..f959d0b 100644
 +static __inline void
 +clac(void)
 +{
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +	__asm __volatile(".byte x0f,0x01,0xca" : : :);
-+#endif	/* INTEL_SMAP */
++#endif
 +}
 +
 +static __inline void
 +stac(void)
 +{
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +	__asm __volatile(".byte x0f,0x01,0xcb" : : :);
-+#endif	/* INTEL_SMAP */
++#endif
 +}
 +
  #else /* !(__GNUCLIKE_ASM && __CC_SUPPORTS___INLINE) */
@@ -538,7 +604,7 @@ index 881fcd2..f959d0b 100644
  void	wrmsr(u_int msr, uint64_t newval);
 diff --git a/sys/amd64/include/smap_instr.h b/sys/amd64/include/smap_instr.h
 new file mode 100644
-index 0000000..5722bbf
+index 0000000..77926aa
 --- /dev/null
 +++ b/sys/amd64/include/smap_instr.h
 @@ -0,0 +1,14 @@
@@ -547,17 +613,17 @@ index 0000000..5722bbf
 +
 +#include "opt_cpu.h"
 +
-+#ifdef	INTEL_SMAP
++#ifdef INTEL_SMAP
 +#define	CLAC	.byte 0x0f,0x01,0xca
 +#define	STAC	.byte 0x0f,0x01,0xcb
-+#else	/* INTEL_SMAP_SUPPORT */
++#else
 +#define	CLAC
 +#define	STAC
-+#endif	/* INTEL_SMAP_SUPPORT */
++#endif
 +
 +#endif	/* __SMAP_INSTRUCTION_H */
 diff --git a/sys/conf/NOTES b/sys/conf/NOTES
-index 48dba77..b27dfeb 100644
+index 48dba77..af1cf71 100644
 --- a/sys/conf/NOTES
 +++ b/sys/conf/NOTES
 @@ -2963,3 +2963,7 @@ options 	RCTL
@@ -566,10 +632,10 @@ index 48dba77..b27dfeb 100644
  
 +# Intel SMAP
 +# This options supported on Haswell and/or newer CPUs (2013 Juni < ) and
-+# makes the kernel unbootable on oldel CPUs.
++# makes the kernel unbootable on older CPUs.
 +options 	INTEL_SMAP	# Intel's hw version of PaX uderef
 diff --git a/sys/conf/options.amd64 b/sys/conf/options.amd64
-index 90348b7..8b4436e 100644
+index 90348b7..b861439 100644
 --- a/sys/conf/options.amd64
 +++ b/sys/conf/options.amd64
 @@ -72,3 +72,6 @@ ISCI_LOGGING	opt_isci.h
@@ -577,7 +643,7 @@ index 90348b7..8b4436e 100644
  PADLOCK_RNG		opt_cpu.h
  RDRAND_RNG		opt_cpu.h
 +
-+# Intel supervisor mode access prevention (SMAP)
++# Intel Supervisor Mode Access Prevention (SMAP)
 +INTEL_SMAP		opt_cpu.h
 diff --git a/sys/x86/include/specialreg.h b/sys/x86/include/specialreg.h
 index bf1333f..6bffd43 100644
@@ -592,5 +658,5 @@ index bf1333f..6bffd43 100644
  /*
   * Bits in AMD64 special registers.  EFER is 64 bits wide.
 -- 
-1.8.2
+1.8.2.2
 
