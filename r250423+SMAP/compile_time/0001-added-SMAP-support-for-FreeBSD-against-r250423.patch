@@ -1,9 +1,31 @@
-From c8ee734cc925d086aa6883a19a97fbe9851bd362 Mon Sep 17 00:00:00 2001
+From 0ce7d7dad7140da16c0e87de3bc4ffa18becdf09 Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Tue, 16 Apr 2013 01:32:25 +0200
 Subject: [PATCH] added SMAP support for FreeBSD against r250423
 
+This patch implemented support for Intel's new protection technology.
+
+Supervisor Mode Access Prevention (SMAP) is newest security feature from
+Intel, which first appears in the Haswell Line of processors.
+
+When SMAP enabled, the kernel cannot access pages that are in userspace.
+In some cases the kernel does have to access user pages, for this reason
+the technology provided two instruction, to temporarily disable this
+protection.
+
+When SMAP detect protection violation, the kernel must call panic().
+
+Intel's SMAP documentation:
+http://software.intel.com/sites/default/files/319433-014.pdf
+
+Test case:
+https://github.com/opntr/freebsd-smap-tester
+
+some parts of this patch discussed with kib freebsd org
+
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+**************************************************************************
 
 added	void clac(void) and	void stac(void) to cpufunc.h
 
@@ -100,21 +122,33 @@ suggested by kib@:
 > bit set.
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+added AC flag checking and factor out SMAP checking in trap_pfault() to make it more readable and
+
+partially suggested by kib:
+> The trap_pfault() fragment should check for the error code equal to 1 or
+> 3, as described in the 9.3.3, instead of only checking for the present
+> bit set. More, I suggest you to explicitely check that the #PF exception
+> came from the kernel mode and that EFLAGS.AC was also set, before
+> decidingto panic due to SMAP-detected failure.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 ---
  sys/amd64/amd64/exception.S     |  6 ++++++
  sys/amd64/amd64/identcpu.c      | 28 +++++++++++++++++++++---
  sys/amd64/amd64/initcpu.c       | 12 +++++++----
  sys/amd64/amd64/pmap.c          | 13 +++++++++++
  sys/amd64/amd64/support.S       | 48 +++++++++++++++++++++++++++++++++++++++++
- sys/amd64/amd64/trap.c          | 18 ++++++++++++++++
+ sys/amd64/amd64/trap.c          | 31 ++++++++++++++++++++++++++
  sys/amd64/ia32/ia32_exception.S |  1 +
  sys/amd64/include/asmacros.h    |  3 ++-
  sys/amd64/include/cpufunc.h     | 23 ++++++++++++++++++++
  sys/amd64/include/smap_instr.h  | 14 ++++++++++++
  sys/conf/NOTES                  |  4 ++++
  sys/conf/options.amd64          |  3 +++
+ sys/x86/include/psl.h           |  2 +-
  sys/x86/include/specialreg.h    |  1 +
- 13 files changed, 166 insertions(+), 8 deletions(-)
+ 14 files changed, 180 insertions(+), 9 deletions(-)
  create mode 100644 sys/amd64/include/smap_instr.h
 
 diff --git a/sys/amd64/amd64/exception.S b/sys/amd64/amd64/exception.S
@@ -495,26 +529,26 @@ index 77dbf63..7ad8101 100644
  	ret
  END(copyinstr)
 diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
-index 6fcca81..bb95b08 100644
+index 6fcca81..0afc891 100644
 --- a/sys/amd64/amd64/trap.c
 +++ b/sys/amd64/amd64/trap.c
-@@ -718,6 +718,24 @@ trap_pfault(frame, usermode)
+@@ -127,6 +127,9 @@ void dblfault_handler(struct trapframe *frame);
+ 
+ static int trap_pfault(struct trapframe *, int);
+ static void trap_fatal(struct trapframe *, vm_offset_t);
++#ifdef INTEL_SMAP
++static bool smap_access_violation(struct trapframe *, int usermode);
++#endif
+ 
+ #define MAX_TRAP_MSG		33
+ static char *trap_msg[] = {
+@@ -718,6 +721,14 @@ trap_pfault(frame, usermode)
  
  		map = &vm->vm_map;
  
 +#ifdef INTEL_SMAP
-+		/*
-+		 * The only case occurs when accessing the address
-+		 * without the handler, is a bug, do not try to handle
-+		 * it normally, and panic immediately.
-+		 * SMAP related.
-+		 *
-+		 * PGEX_P exception delivered only by SMAP.
-+		 * see intel 319433-014.pdf 9.3.3
-+		 */
-+		if (!usermode && curpcb->pcb_onfault == NULL &&
-+		    (frame->tf_err == PGEX_P ||
-+		     frame->tf_err == (PGEX_P | PGEX_W))) {
++		if (__predict_false(smap_access_violation(frame, usermode) &&
++		    curpcb->pcb_onfault == NULL)) {
 +			trap_fatal(frame, eva);
 +			return (-1);
 +		}
@@ -523,6 +557,33 @@ index 6fcca81..bb95b08 100644
  		/*
  		 * When accessing a usermode address, kernel must be
  		 * ready to accept the page fault, and provide a
+@@ -874,6 +885,26 @@ trap_fatal(frame, eva)
+ 		panic("unknown/reserved trap");
+ }
+ 
++static bool
++smap_access_violation(struct trapframe *frame, int usermode)
++{
++	if (usermode)
++		return (false);
++
++	if ((cpu_stdext_feature & CPUID_STDEXT_SMAP) == 0 ||
++	    (frame->tf_rflags & PSL_AC) == 0)
++		return (false);
++
++	/*
++	 * PGEX_P exception delivered only by SMAP.
++	 * see intel 319433-014.pdf 9.3.3
++	 */
++	if (frame->tf_err == PGEX_P || frame->tf_err == (PGEX_P | PGEX_W))
++		return (true);
++
++	return (false);
++}
++
+ /*
+  * Double fault handler. Called when a fault occurs while writing
+  * a frame for a trap/exception onto the stack. This usually occurs
 diff --git a/sys/amd64/ia32/ia32_exception.S b/sys/amd64/ia32/ia32_exception.S
 index fe1a676..9f13f2f 100644
 --- a/sys/amd64/ia32/ia32_exception.S
@@ -645,6 +706,19 @@ index 90348b7..b861439 100644
 +
 +# Intel Supervisor Mode Access Prevention (SMAP)
 +INTEL_SMAP		opt_cpu.h
+diff --git a/sys/x86/include/psl.h b/sys/x86/include/psl.h
+index 12d05c5..ce97a26 100644
+--- a/sys/x86/include/psl.h
++++ b/sys/x86/include/psl.h
+@@ -52,7 +52,7 @@
+ #define	PSL_NT		0x00004000	/* nested task bit */
+ #define	PSL_RF		0x00010000	/* resume flag bit */
+ #define	PSL_VM		0x00020000	/* virtual 8086 mode bit */
+-#define	PSL_AC		0x00040000	/* alignment checking */
++#define	PSL_AC		0x00040000	/* alignment checking or SMAP status*/
+ #define	PSL_VIF		0x00080000	/* virtual interrupt enable */
+ #define	PSL_VIP		0x00100000	/* virtual interrupt pending */
+ #define	PSL_ID		0x00200000	/* identification bit */
 diff --git a/sys/x86/include/specialreg.h b/sys/x86/include/specialreg.h
 index bf1333f..6bffd43 100644
 --- a/sys/x86/include/specialreg.h
