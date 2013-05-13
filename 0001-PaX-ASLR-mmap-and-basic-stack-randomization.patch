@@ -1,9 +1,9 @@
-From be43889730ce12c635bb242bd4c4c1df7ce6778d Mon Sep 17 00:00:00 2001
+From 2ee97cb679b36289121d01da358f06e8b5e32bcd Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Sat, 27 Apr 2013 00:36:43 +0200
-Subject: [PATCH 1/2] PaX ASLR - mmap and stack randomization
+Subject: [PATCH] PaX ASLR - mmap and basic stack randomization
 
-***
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
 added basic PaX ASLR defines and sysctls
 
@@ -58,7 +58,17 @@ PaX ASLR - randomize the stack in freebsd32 compat layer
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
+PaX ASLR - increase the upper limit of stack randomization
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
 PaX ASLR - align stack delta
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+Revert "PaX ASLR - increase the upper limit of stack randomization"
+
+This reverts commit 2f0768940d3af93f957a8000def2ad9cd4571176.
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
@@ -70,10 +80,34 @@ PaX ASLR - rename pax_aslr(...) to pax_aslr_mmap(...)
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
+PaX ASLR - fix stack accounting
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
 PaX ASLR - initialize vm_aslr_delta_* on vmspace allocation
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - separate shared page from stack
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+Revert "PaX ASLR - fix stack accounting"
+
+This reverts commit 8f2487ae7db17880aa13648a4f15f61c7de85341.
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - separate shared page from stack in linuxulator
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+
+PaX ASLR - fix stack address - related to alignment
+
+Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 ---
+ sys/amd64/include/vmparam.h           |   2 +-
+ sys/amd64/linux32/linux.h             |   2 +-
  sys/compat/freebsd32/freebsd32_misc.c |  13 +
  sys/conf/files                        |   1 +
  sys/conf/options                      |   5 +
@@ -83,10 +117,36 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
  sys/vm/vm_map.c                       |   6 +
  sys/vm/vm_map.h                       |   2 +
  sys/vm/vm_mmap.c                      |  14 ++
- 9 files changed, 668 insertions(+)
+ 11 files changed, 670 insertions(+), 2 deletions(-)
  create mode 100644 sys/kern/kern_pax.c
  create mode 100644 sys/sys/pax.h
 
+diff --git a/sys/amd64/include/vmparam.h b/sys/amd64/include/vmparam.h
+index e06fa39..1bc57c3 100644
+--- a/sys/amd64/include/vmparam.h
++++ b/sys/amd64/include/vmparam.h
+@@ -176,7 +176,7 @@
+ #define	VM_MAXUSER_ADDRESS	UVADDR(NUPML4E, 0, 0, 0)
+ 
+ #define	SHAREDPAGE		(VM_MAXUSER_ADDRESS - PAGE_SIZE)
+-#define	USRSTACK		SHAREDPAGE
++#define	USRSTACK		(SHAREDPAGE - 4*PAGE_SIZE)
+ 
+ #define	VM_MAX_ADDRESS		UPT_MAX_ADDRESS
+ #define	VM_MIN_ADDRESS		(0)
+diff --git a/sys/amd64/linux32/linux.h b/sys/amd64/linux32/linux.h
+index 7b52a64..1ba0dea 100644
+--- a/sys/amd64/linux32/linux.h
++++ b/sys/amd64/linux32/linux.h
+@@ -50,7 +50,7 @@ MALLOC_DECLARE(M_LINUX);
+ 
+ #define	LINUX32_MAXUSER		((1ul << 32) - PAGE_SIZE)
+ #define	LINUX32_SHAREDPAGE	(LINUX32_MAXUSER - PAGE_SIZE)
+-#define	LINUX32_USRSTACK	LINUX32_SHAREDPAGE
++#define	LINUX32_USRSTACK	(LINUX32_SHAREDPAGE - 4*PAGE_SIZE)
+ 
+ /* XXX 16 = sizeof(linux32_ps_strings) */
+ #define	LINUX32_PS_STRINGS	(LINUX32_USRSTACK - 16)
 diff --git a/sys/compat/freebsd32/freebsd32_misc.c b/sys/compat/freebsd32/freebsd32_misc.c
 index 934a32d..3f28724e 100644
 --- a/sys/compat/freebsd32/freebsd32_misc.c
@@ -670,7 +730,7 @@ index 0000000..02699b3
 +}
 diff --git a/sys/sys/pax.h b/sys/sys/pax.h
 new file mode 100644
-index 0000000..9cf7f12
+index 0000000..68a6995
 --- /dev/null
 +++ b/sys/sys/pax.h
 @@ -0,0 +1,161 @@
@@ -761,7 +821,7 @@ index 0000000..9cf7f12
 +#endif /* PAX_ASLR_DELTA_MMAP_MAX_LEN */
 +
 +#ifndef PAX_ASLR_DELTA_STACK_LSB
-+#define PAX_ASLR_DELTA_STACK_LSB	0
++#define PAX_ASLR_DELTA_STACK_LSB	3
 +#endif /* PAX_ASLR_DELTA_STACK_LSB */
 +
 +#ifndef PAX_ASLR_DELTA_STACK_MIN_LEN
@@ -800,7 +860,7 @@ index 0000000..9cf7f12
 +#endif /* PAX_ASLR_COMPAT_DELTA_MMAP_MAX_LEN */
 +
 +#ifndef PAX_ASLR_COMPAT_DELTA_STACK_LSB
-+#define PAX_ASLR_COMPAT_DELTA_STACK_LSB		0
++#define PAX_ASLR_COMPAT_DELTA_STACK_LSB		3
 +#endif /* PAX_ASLR_COMPAT_DELTA_STACK_LSB */
 +
 +#ifndef PAX_ASLR_COMPAT_DELTA_STACK_MIN_LEN
@@ -926,5 +986,5 @@ index c17e9ce..9113fbb 100644
  	    flags, handle_type, handle, pos);
  	td->td_fpop = NULL;
 -- 
-1.8.2
+1.8.2.2
 
