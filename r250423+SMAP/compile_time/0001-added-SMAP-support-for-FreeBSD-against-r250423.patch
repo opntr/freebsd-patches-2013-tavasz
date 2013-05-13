@@ -1,7 +1,7 @@
-From e9e55d75c4ee75dab60681e4f7c243131d323cb3 Mon Sep 17 00:00:00 2001
+From 5ca27daf9d03110c2b167fbc41fe251e13ce2513 Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Tue, 16 Apr 2013 01:32:25 +0200
-Subject: [PATCH]  added SMAP support for FreeBSD against r250423
+Subject: [PATCH] added SMAP support for FreeBSD against r250423
 
 This patch implemented support for Intel's new protection technology.
 
@@ -25,131 +25,71 @@ some parts of this patch discussed with kib freebsd org and Hunger
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
-----------------------------------------------------------------------
+    ----------------------------------------------------------------------
 
-added	void clac(void) and	void stac(void) to cpufunc.h
+* added	void clac(void) and	void stac(void) to cpufunc.h
+* added STAC/CLAC instruction and added config options
+* added basic support for SMAP
+* added stac/clac in support.S around userspace memory access
+* added RFLAGS.AC clearing to exception.S related to SMAP
+* added RFLAGS.AC clearing to ia32_exception.S related to SMAP
+* added RFLAGS.AC clearing to asmacros.h related to SMAP
+* clac and stac functions depend on INTEL_SMAP
+* added trap handler to SMAP
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+	For security reason, when PF occured by SMAP, the kernel should paniced.
 
-added STAC/CLAC instruction and added config options
+	" [...]
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+	The above items imply that the error code delivered by a page-fault
+	exception due to SMAP is either 1 (for reads) or 3 (for writes).
+	Note that the only page-fault exceptions that deliver an error code
+	of 1 are those induced by SMAP. (If CR0.WP = 1, some page-fault
+	exceptions may deliver an error code of 3 even if CR4.SMAP = 0.)
 
-added basic support for SMAP
+	[...]" - intel 319433-014.pdf 9.3.3
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+* Clear the RFLAGS.AC on the start of nmi handler
 
-added stac/clac in support.S around userspace memory access
+	suggested by kib@:
+	> I think that NMI handler should have CLAC executed unconditionally and
+	> much earlier then it is done in your patch. Since NMI could interrupt
+	> the copy*() functions, you would get some kernel code unneccessary
+	> executing with SMAP off.
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+* added note to fault handlers related to SMAP
 
-added RFLAGS.AC clearing to exception.S related to SMAP
+	suggested by kib@:
+	> I believe that exception labels in the support.S, like copyout_fault
+	> etc
+	> deserve a comment describing that EFLAGS.AC bit gets cleared by the
+	> exception entry point before the control reaches the label.
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+* added AC flag checking and factor out SMAP checking in trap_pfault() to make it more readable and
 
-added RFLAGS.AC clearing to ia32_exception.S related to SMAP
+	partially suggested by kib:
+	> The trap_pfault() fragment should check for the error code equal to 1 or
+	> 3, as described in the 9.3.3, instead of only checking for the present
+	> bit set. More, I suggest you to explicitely check that the #PF exception
+	> came from the kernel mode and that EFLAGS.AC was also set, before
+	> decidingto panic due to SMAP-detected failure.
 
-added RFLAGS.AC clearing to asmacros.h related to SMAP
+* build fix, when INTEL_SMAP has not set in kernel config
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
+	/usr/home/op/git/freebsd-base.git.http/sys/amd64/amd64/trap.c:889:1: error: unused function 'smap_access_violation' [-Werror,-Wunused-function]
+	smap_access_violation(struct trapframe *frame, int usermode)
+	^
+	1 error generated.
+	*** [trap.o] Error code 1
+	1 error
+	*** [buildkernel] Error code 2
+	1 error
+	*** [buildkernel] Error code 2
+	1 error
 
-clac and stac functions depend on INTEL_SMAP
+* fixed smap_access_violation(...), spotted by Hunger
 
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-added trap handler to SMAP
-
-For security reason, when PF occured by SMAP, the kernel should paniced.
-
-" [...]
-
-The above items imply that the error code delivered by a page-fault exception
-due to SMAP is either 1 (for reads) or 3 (for writes).
-Note that the only page-fault exceptions that deliver an error code of 1 are
-those induced by SMAP. (If CR0.WP = 1, some page-fault exceptions may deliver an
-error code of 3 even if CR4.SMAP = 0.)
-
-[...]" - intel 319433-014.pdf 9.3.3
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-fixed smap trap handler
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-fixed the trap handler 2.
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-SMAP - fixed commend in trap.c
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-Clear the RFLAGS.AC on the start of nmi handler
-
-suggested by kib@:
-> I think that NMI handler should have CLAC executed unconditionally and
-> much earlier then it is done in your patch. Since NMI could interrupt
-> the copy*() functions, you would get some kernel code unneccessary
-> executing with SMAP off.
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-added note to fault handlers related to SMAP
-
-suggested by kib@:
-> I believe that exception labels in the support.S, like copyout_fault
-> etc
-> deserve a comment describing that EFLAGS.AC bit gets cleared by the
-> exception entry point before the control reaches the label.
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-restored original comment in trap.c
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-style(9) and spelling fixes
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-explicitly check the SMAP error codes, and not the existence of PGEX_P bit
-
-suggested by kib@:
-> The trap_pfault() fragment should check for the error code equal to 1
-> or
-> 3, as described in the 9.3.3, instead of only checking for the present
-> bit set.
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-added AC flag checking and factor out SMAP checking in trap_pfault() to make it more readable and
-
-partially suggested by kib:
-> The trap_pfault() fragment should check for the error code equal to 1 or
-> 3, as described in the 9.3.3, instead of only checking for the present
-> bit set. More, I suggest you to explicitely check that the #PF exception
-> came from the kernel mode and that EFLAGS.AC was also set, before
-> decidingto panic due to SMAP-detected failure.
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-build fix, when INTEL_SMAP has not set in kernel config
-
-/usr/home/op/git/freebsd-base.git.http/sys/amd64/amd64/trap.c:889:1: error: unused function 'smap_access_violation' [-Werror,-Wunused-function]
-smap_access_violation(struct trapframe *frame, int usermode)
-^
-1 error generated.
-*** [trap.o] Error code 1
-1 error
-*** [buildkernel] Error code 2
-1 error
-*** [buildkernel] Error code 2
-1 error
-
-Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
-
-fixed smap_access_violation(...), spotted by Hunger
+* fix smap_access_violatrion() when the CPU does not support SMAP
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 ---
@@ -158,7 +98,7 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
  sys/amd64/amd64/initcpu.c       | 12 +++++++----
  sys/amd64/amd64/pmap.c          | 13 +++++++++++
  sys/amd64/amd64/support.S       | 48 +++++++++++++++++++++++++++++++++++++++++
- sys/amd64/amd64/trap.c          | 25 +++++++++++++++++++++
+ sys/amd64/amd64/trap.c          | 24 +++++++++++++++++++++
  sys/amd64/ia32/ia32_exception.S |  1 +
  sys/amd64/include/asmacros.h    |  3 ++-
  sys/amd64/include/cpufunc.h     | 23 ++++++++++++++++++++
@@ -167,7 +107,7 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
  sys/conf/options.amd64          |  3 +++
  sys/x86/include/psl.h           |  2 +-
  sys/x86/include/specialreg.h    |  1 +
- 14 files changed, 174 insertions(+), 9 deletions(-)
+ 14 files changed, 173 insertions(+), 9 deletions(-)
  create mode 100644 sys/amd64/include/smap_instr.h
 
 diff --git a/sys/amd64/amd64/exception.S b/sys/amd64/amd64/exception.S
@@ -548,7 +488,7 @@ index 77dbf63..7ad8101 100644
  	ret
  END(copyinstr)
 diff --git a/sys/amd64/amd64/trap.c b/sys/amd64/amd64/trap.c
-index 6fcca81..dfacfc7 100644
+index 6fcca81..d37949e 100644
 --- a/sys/amd64/amd64/trap.c
 +++ b/sys/amd64/amd64/trap.c
 @@ -127,6 +127,9 @@ void dblfault_handler(struct trapframe *frame);
@@ -575,7 +515,7 @@ index 6fcca81..dfacfc7 100644
  		/*
  		 * When accessing a usermode address, kernel must be
  		 * ready to accept the page fault, and provide a
-@@ -874,6 +884,21 @@ trap_fatal(frame, eva)
+@@ -874,6 +884,20 @@ trap_fatal(frame, eva)
  		panic("unknown/reserved trap");
  }
  
@@ -583,11 +523,10 @@ index 6fcca81..dfacfc7 100644
 +static bool
 +smap_access_violation(struct trapframe *frame, int usermode)
 +{
-+	if (usermode)
++	if ((cpu_stdext_feature & CPUID_STDEXT_SMAP) == 0)
 +		return (false);
 +
-+	if ((cpu_stdext_feature & CPUID_STDEXT_SMAP) != 0 &&
-+	    (frame->tf_rflags & PSL_AC) != 0)
++	if (usermode || (frame->tf_rflags & PSL_AC) != 0)
 +		return (false);
 +
 +	return (true);
