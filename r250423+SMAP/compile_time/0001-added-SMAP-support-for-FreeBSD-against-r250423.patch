@@ -1,4 +1,4 @@
-From 5ca27daf9d03110c2b167fbc41fe251e13ce2513 Mon Sep 17 00:00:00 2001
+From ae18b374b38401f736e4e13a8ab5fab82985df2b Mon Sep 17 00:00:00 2001
 From: Oliver Pinter <oliver.pntr@gmail.com>
 Date: Tue, 16 Apr 2013 01:32:25 +0200
 Subject: [PATCH] added SMAP support for FreeBSD against r250423
@@ -25,7 +25,7 @@ some parts of this patch discussed with kib freebsd org and Hunger
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 
-    ----------------------------------------------------------------------
+----------------------------------------------------------------------
 
 * added	void clac(void) and	void stac(void) to cpufunc.h
 * added STAC/CLAC instruction and added config options
@@ -37,59 +37,68 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 * clac and stac functions depend on INTEL_SMAP
 * added trap handler to SMAP
 
-	For security reason, when PF occured by SMAP, the kernel should paniced.
+For security reason, when PF occured by SMAP, the kernel should paniced.
 
-	" [...]
+" [...]
 
-	The above items imply that the error code delivered by a page-fault
-	exception due to SMAP is either 1 (for reads) or 3 (for writes).
-	Note that the only page-fault exceptions that deliver an error code
-	of 1 are those induced by SMAP. (If CR0.WP = 1, some page-fault
-	exceptions may deliver an error code of 3 even if CR4.SMAP = 0.)
+The above items imply that the error code delivered by a page-fault
+exception due to SMAP is either 1 (for reads) or 3 (for writes).
+Note that the only page-fault exceptions that deliver an error code
+of 1 are those induced by SMAP. (If CR0.WP = 1, some page-fault
+exceptions may deliver an error code of 3 even if CR4.SMAP = 0.)
 
-	[...]" - intel 319433-014.pdf 9.3.3
+[...]" - intel 319433-014.pdf 9.3.3
 
 * Clear the RFLAGS.AC on the start of nmi handler
 
-	suggested by kib@:
-	> I think that NMI handler should have CLAC executed unconditionally and
-	> much earlier then it is done in your patch. Since NMI could interrupt
-	> the copy*() functions, you would get some kernel code unneccessary
-	> executing with SMAP off.
+suggested by kib@:
+> I think that NMI handler should have CLAC executed unconditionally and
+> much earlier then it is done in your patch. Since NMI could interrupt
+> the copy*() functions, you would get some kernel code unneccessary
+> executing with SMAP off.
 
 * added note to fault handlers related to SMAP
 
-	suggested by kib@:
-	> I believe that exception labels in the support.S, like copyout_fault
-	> etc
-	> deserve a comment describing that EFLAGS.AC bit gets cleared by the
-	> exception entry point before the control reaches the label.
+suggested by kib@:
+> I believe that exception labels in the support.S, like copyout_fault
+> etc
+> deserve a comment describing that EFLAGS.AC bit gets cleared by the
+> exception entry point before the control reaches the label.
 
 * added AC flag checking and factor out SMAP checking in trap_pfault() to make it more readable and
 
-	partially suggested by kib:
-	> The trap_pfault() fragment should check for the error code equal to 1 or
-	> 3, as described in the 9.3.3, instead of only checking for the present
-	> bit set. More, I suggest you to explicitely check that the #PF exception
-	> came from the kernel mode and that EFLAGS.AC was also set, before
-	> decidingto panic due to SMAP-detected failure.
+partially suggested by kib:
+> The trap_pfault() fragment should check for the error code equal to 1 or
+> 3, as described in the 9.3.3, instead of only checking for the present
+> bit set. More, I suggest you to explicitely check that the #PF exception
+> came from the kernel mode and that EFLAGS.AC was also set, before
+> decidingto panic due to SMAP-detected failure.
 
 * build fix, when INTEL_SMAP has not set in kernel config
 
-	/usr/home/op/git/freebsd-base.git.http/sys/amd64/amd64/trap.c:889:1: error: unused function 'smap_access_violation' [-Werror,-Wunused-function]
-	smap_access_violation(struct trapframe *frame, int usermode)
-	^
-	1 error generated.
-	*** [trap.o] Error code 1
-	1 error
-	*** [buildkernel] Error code 2
-	1 error
-	*** [buildkernel] Error code 2
-	1 error
+/usr/home/op/git/freebsd-base.git.http/sys/amd64/amd64/trap.c:889:1: error: unused function 'smap_access_violation' [-Werror,-Wunused-function]
+smap_access_violation(struct trapframe *frame, int usermode)
+^
+1 error generated.
+*** [trap.o] Error code 1
+1 error
+*** [buildkernel] Error code 2
+1 error
+*** [buildkernel] Error code 2
+1 error
 
 * fixed smap_access_violation(...), spotted by Hunger
 
 * fix smap_access_violatrion() when the CPU does not support SMAP
+
+* use the CLAC and STAC macro, instead of the .byte sequence
+
+* added memory clobber to clac and stac inline assembly
+
+	clac and stac are sensitive instructions,
+	to prevent instruction reordering added memory clobber
+
+	spotted by Hunger, PaXTeam
 
 Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
 ---
@@ -101,13 +110,13 @@ Signed-off-by: Oliver Pinter <oliver.pntr@gmail.com>
  sys/amd64/amd64/trap.c          | 24 +++++++++++++++++++++
  sys/amd64/ia32/ia32_exception.S |  1 +
  sys/amd64/include/asmacros.h    |  3 ++-
- sys/amd64/include/cpufunc.h     | 23 ++++++++++++++++++++
+ sys/amd64/include/cpufunc.h     | 27 +++++++++++++++++++++++
  sys/amd64/include/smap_instr.h  | 14 ++++++++++++
  sys/conf/NOTES                  |  4 ++++
  sys/conf/options.amd64          |  3 +++
  sys/x86/include/psl.h           |  2 +-
  sys/x86/include/specialreg.h    |  1 +
- 14 files changed, 173 insertions(+), 9 deletions(-)
+ 14 files changed, 177 insertions(+), 9 deletions(-)
  create mode 100644 sys/amd64/include/smap_instr.h
 
 diff --git a/sys/amd64/amd64/exception.S b/sys/amd64/amd64/exception.S
@@ -563,10 +572,10 @@ index 1fb592a..c985623 100644
  #define POP_FRAME							\
  	movq	TF_RDI(%rsp),%rdi ;					\
 diff --git a/sys/amd64/include/cpufunc.h b/sys/amd64/include/cpufunc.h
-index 881fcd2..fd9f95b 100644
+index 881fcd2..53b2ce8 100644
 --- a/sys/amd64/include/cpufunc.h
 +++ b/sys/amd64/include/cpufunc.h
-@@ -39,6 +39,8 @@
+@@ -39,10 +39,16 @@
  #ifndef _MACHINE_CPUFUNC_H_
  #define	_MACHINE_CPUFUNC_H_
  
@@ -575,7 +584,15 @@ index 881fcd2..fd9f95b 100644
  #ifndef _SYS_CDEFS_H_
  #error this file needs sys/cdefs.h as a prerequisite
  #endif
-@@ -711,11 +713,31 @@ intr_restore(register_t rflags)
+ 
++#ifdef INTEL_SMAP
++#include <machine/smap_instr.h>
++#endif
++
+ struct region_descriptor;
+ 
+ #define readb(va)	(*(volatile uint8_t *) (va))
+@@ -711,11 +717,31 @@ intr_restore(register_t rflags)
  	write_rflags(rflags);
  }
  
@@ -586,7 +603,7 @@ index 881fcd2..fd9f95b 100644
 +clac(void)
 +{
 +#ifdef INTEL_SMAP
-+	__asm __volatile(".byte x0f,0x01,0xca" : : :);
++	__asm __volatile(__STRING(CLAC) : : : "memory");
 +#endif
 +}
 +
@@ -594,7 +611,7 @@ index 881fcd2..fd9f95b 100644
 +stac(void)
 +{
 +#ifdef INTEL_SMAP
-+	__asm __volatile(".byte x0f,0x01,0xcb" : : :);
++	__asm __volatile(__STRING(STAC) : : : "memory");
 +#endif
 +}
 +
@@ -607,7 +624,7 @@ index 881fcd2..fd9f95b 100644
  void	clflush(u_long addr);
  void	clts(void);
  void	cpuid_count(u_int ax, u_int cx, u_int *p);
-@@ -775,6 +797,7 @@ uint64_t rdtsc(void);
+@@ -775,6 +801,7 @@ uint64_t rdtsc(void);
  u_long	read_rflags(void);
  u_int	rfs(void);
  u_int	rgs(void);
